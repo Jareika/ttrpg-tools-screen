@@ -1,20 +1,19 @@
 # TTRPG Tools: Player Screen
 
-Screen Display is an Obsidian plugin for sending content to a separate popout window that can be shown on a second screen, TV, or projector.
+Player Screen is an Obsidian plugin for sending content to a separate popout window that can be shown on a second screen, TV, or projector.
 
 It is designed for tabletop and GM use cases and works especially well together with custom plugins such as interactive maps.
 
 ## Features
 
-### Second-screen popout
+### Player-screen popout
 - Opens a dedicated popout window inside Obsidian
 - Can be kept on a separate monitor
 - Window position and size are remembered automatically
 
 ### Send notes
-- Send the active note to the second screen
+- Send the active note to the player screen
 - Send a note from the file menu
-- Click internal links on the second screen to follow them
 
 ### Send markdown snippets
 - Send the current paragraph
@@ -53,7 +52,7 @@ It is designed for tabletop and GM use cases and works especially well together 
 
 ### Map-friendly rendering
 - Detects markdown that only contains a `zoommap` code block
-- Adds a special CSS class so map views can be centered and made non-interactive on the second screen
+- Adds a special CSS class so map views can be centered and made non-interactive on the player screen
 
 ## Commands
 
@@ -65,7 +64,7 @@ It is designed for tabletop and GM use cases and works especially well together 
 ## Settings
 
 - **Auto-open on send**
-  - Automatically opens the second-screen window when content is sent
+  - Automatically opens the player-screen window when content is sent
 
 - **Remember window placement**
   - The plugin automatically stores the last popout window position and size
@@ -73,7 +72,7 @@ It is designed for tabletop and GM use cases and works especially well together 
 
 ## Plugin API
 
-Other plugins can send content directly to Screen Display:
+Other plugins can send content directly to Player Screen:
 
 ### Send a note
 ```ts
