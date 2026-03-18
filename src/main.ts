@@ -589,7 +589,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   public async sendNoteByPath(path: string): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) {
-      new Notice(`Screen Display: note not found: ${path}`, 3000);
+      new Notice(`Player Screen: note not found: ${path}`, 3000);
       return;
     }
 
@@ -660,7 +660,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     if (ext === "md") {
       menu.addItem((item) => {
         item
-          .setTitle("Send note to second screen")
+          .setTitle("Send note to player screen")
           .setIcon("monitor-up")
           .onClick(() => {
             void this.sendNoteByPath(file.path);
@@ -672,7 +672,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     if (isImageExt(ext)) {
       menu.addItem((item) => {
         item
-          .setTitle("Send image to second screen")
+          .setTitle("Send image to player screen")
           .setIcon("image")
           .onClick(() => {
             void this.sendImageByPath(file.path);
@@ -684,7 +684,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     if (isPdfExt(ext)) {
       menu.addItem((item) => {
         item
-          .setTitle("Send PDF to second screen")
+          .setTitle("Send PDF to player screen")
           .setIcon("file-text")
           .onClick(() => {
             void this.sendPdfByPath(file.path);
@@ -699,7 +699,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     menu.addItem((item) => {
       item
-        .setTitle("Send note to second screen")
+        .setTitle("Send note to player screen")
         .setIcon("monitor-up")
         .onClick(() => {
           void this.sendNoteByPath(file.path);
@@ -723,7 +723,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     } else {
       menu.addItem((item) => {
         item
-          .setTitle("Send current paragraph to second screen")
+          .setTitle("Send current paragraph to player screen")
           .setIcon("pilcrow")
           .onClick(() => {
             const md = this.extractCurrentParagraph(editor);
@@ -758,7 +758,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         const menu = new Menu();
         menu.addItem((item) => {
           item
-            .setTitle("Send image to second screen")
+            .setTitle("Send image to player screen")
             .setIcon("image")
             .onClick(() => {
               if (file) void this.sendImageByPath(file.path);
@@ -791,21 +791,21 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         if (ext === "md") {
           menu.addItem((item) => {
             item
-              .setTitle("Send note to second screen")
+              .setTitle("Send note to player screen")
               .setIcon("monitor-up")
               .onClick(() => void this.sendNoteByPath(file.path));
           });
         } else if (isPdfExt(ext)) {
           menu.addItem((item) => {
             item
-              .setTitle("Send PDF to second screen")
+              .setTitle("Send PDF to player screen")
               .setIcon("file-text")
               .onClick(() => void this.sendPdfByPath(file.path));
           });
         } else if (isImageExt(ext)) {
           menu.addItem((item) => {
             item
-              .setTitle("Send image to second screen")
+              .setTitle("Send image to player screen")
               .setIcon("image")
               .onClick(() => void this.sendImageByPath(file.path));
           });
@@ -842,7 +842,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         const menu = new Menu();
         menu.addItem((item) => {
           item
-            .setTitle("Send PDF to second screen")
+            .setTitle("Send PDF to player screen")
             .setIcon("file-text")
             .onClick(() => void this.sendPdfByPath(file.path));
         });
@@ -906,7 +906,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         const menu = new Menu();
         menu.addItem((item) => {
           item
-            .setTitle("Send paragraph to second screen")
+            .setTitle("Send paragraph to player screen")
             .setIcon("pilcrow")
             .onClick(() => {
               void this.sendMarkdown(`${text}\n`, sourcePath);
@@ -1037,7 +1037,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         return leaf;
       } catch (e) {
         console.error(e);
-        new Notice("Could not open second screen window.", 3000);
+        new Notice("Could not open player screen window.", 3000);
         return null;
       }
     };
@@ -1087,7 +1087,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     if (!this.currentPayload) return;
 
     if (!this.screenLeaf && !this.settings.autoOpenOnSend) {
-      new Notice("Open the second screen window first.", 2500);
+      new Notice("Open the player screen window first.", 2500);
       return;
     }
 
@@ -1096,7 +1096,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     const view = leaf.view;
     if (!(view instanceof ScreenDisplayView)) {
-      new Notice("Second screen view could not be initialized.", 2500);
+      new Notice("Player screen view could not be initialized.", 2500);
       return;
     }
 
@@ -1134,7 +1134,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       const menu = new Menu();
       menu.addItem((item) => {
         item
-          .setTitle("Send image to second screen")
+          .setTitle("Send image to player screen")
           .setIcon("image")
           .onClick(() => {
             if (file) {
@@ -1163,7 +1163,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
           const menu = new Menu();
           menu.addItem((item) => {
             item
-              .setTitle("Send PDF to second screen")
+              .setTitle("Send PDF to player screen")
               .setIcon("file-text")
               .onClick(() => {
                 void this.sendPdfByPath(file.path);
@@ -1194,7 +1194,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       if (ext === "md") {
         menu.addItem((item) => {
           item
-            .setTitle("Send note to second screen")
+            .setTitle("Send note to player screen")
             .setIcon("monitor-up")
             .onClick(() => {
               void this.sendNoteByPath(file.path);
@@ -1203,7 +1203,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       } else if (isPdfExt(ext)) {
         menu.addItem((item) => {
           item
-            .setTitle("Send PDF to second screen")
+            .setTitle("Send PDF to player screen")
             .setIcon("file-text")
             .onClick(() => {
               void this.sendPdfByPath(file.path);
@@ -1212,7 +1212,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       } else if (isImageExt(ext)) {
         menu.addItem((item) => {
           item
-            .setTitle("Send image to second screen")
+            .setTitle("Send image to player screen")
             .setIcon("image")
             .onClick(() => {
               void this.sendImageByPath(file.path);
@@ -1300,7 +1300,7 @@ class ScreenDisplaySettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Remember window placement")
-      .setDesc("The screen display window remembers its last size and position automatically.")
+      .setDesc("The player screen window remembers its last size and position automatically.")
       .addButton((b) => {
         b.setButtonText("Reset saved position").onClick(async () => {
           delete this.plugin.settings.savedWindowX;
