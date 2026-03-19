@@ -151,19 +151,22 @@ class ScreenDisplayView extends ItemView {
     }
   }
 
-  async onClose(): Promise<void> {
-    this.renderComponent?.unload();
-    this.renderComponent = null;
-    this.persistCurrentWindowBounds();
-    this.stopWindowTracking();
-    try {
-      this.removePlainWindowChrome();
-    } catch {
-      // Ignore
-    } finally {
-      this.plugin.notifyScreenLeafClosed(this.leaf);
-    }
-  }
+	onClose(): Promise<void> {
+	  this.renderComponent?.unload();
+	  this.renderComponent = null;
+	  this.persistCurrentWindowBounds();
+	  this.stopWindowTracking();
+
+	  try {
+		this.removePlainWindowChrome();
+	  } catch {
+		// Ignore
+	  } finally {
+		this.plugin.notifyScreenLeafClosed(this.leaf);
+	  }
+
+	  return Promise.resolve();
+	}
 
   onResize(): void {
     this.applyPlainWindowChrome();
