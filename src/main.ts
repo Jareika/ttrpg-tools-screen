@@ -418,6 +418,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
   private screenLeaf: WorkspaceLeaf | null = null;
   private currentPayload: ScreenPayload | null = null;
+  private previewContextMenuRoots = new WeakSet<HTMLElement>();
   private boundsSaveTimer: number | null = null;
 
   async onload(): Promise<void> {
@@ -741,16 +742,20 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   }
 
   private attachPreviewContextMenus(el: HTMLElement, ctx: MarkdownPostProcessorContext): void {
-    const sourcePath = ctx.sourcePath;
+    if (this.previewContextMenuRoots.has(el)) return;
+    this.previewContextMenuRoots.add(el);
+
+	const sourcePath = ctx.sourcePath;
     const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
     const markdownFile = sourceFile instanceof TFile ? sourceFile : null;
 
-    // Images in reading view
-    el.querySelectorAll("img").forEach((img) => {
-      if (img.dataset.ttrpgScreenBound === "true") return;
-      img.dataset.ttrpgScreenBound = "true";
+    el.addEventListener("contextmenu", (ev) => {
+      const target = ev.target;
+      if (!(target instanceof Element)) return;
 
-      img.addEventListener("contextmenu", (ev) => {
+      // Images in reading view
+      const img = target.closest("img");
+      if (img instanceof HTMLImageElement && el.contains(img)) {
         const file = this.resolveImageElementToFile(img, sourcePath);
         const rawSrc = img.getAttribute("src") ?? "";
         if (!file && !rawSrc) return;
@@ -769,16 +774,12 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
             });
         });
         menu.showAtMouseEvent(ev);
-      });
-    });
+        return;
+      }
 
-    // Internal note/image/pdf links in reading view
-    el.querySelectorAll("a.internal-link").forEach((node) => {
-      const link = node as HTMLAnchorElement;
-      if (link.dataset.ttrpgScreenBound === "true") return;
-      link.dataset.ttrpgScreenBound = "true";
-
-      link.addEventListener("contextmenu", (ev) => {
+      // Internal note/image/pdf links in reading view
+      const link = target.closest("a.internal-link");
+      if (link instanceof HTMLAnchorElement && el.contains(link)) {
         const raw =
           link.getAttribute("data-href") ??
           link.getAttribute("href") ??
@@ -788,29 +789,36 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         const file = this.resolveVaultFile(raw, sourcePath);
         if (!(file instanceof TFile)) return;
 
-        const menu = new Menu();
         const ext = file.extension?.toLowerCase() ?? "";
+
+        const menu = new Menu();
 
         if (ext === "md") {
           menu.addItem((item) => {
             item
               .setTitle("Send note to player screen")
               .setIcon("monitor-up")
-              .onClick(() => void this.sendNoteByPath(file.path));
+              .onClick(() => {
+                void this.sendNoteByPath(file.path);
+              });
           });
         } else if (isPdfExt(ext)) {
           menu.addItem((item) => {
             item
               .setTitle("Send PDF to player screen")
               .setIcon("file-text")
-              .onClick(() => void this.sendPdfByPath(file.path));
+              .onClick(() => {
+                void this.sendPdfByPath(file.path);
+              });
           });
         } else if (isImageExt(ext)) {
           menu.addItem((item) => {
             item
               .setTitle("Send image to player screen")
               .setIcon("image")
-              .onClick(() => void this.sendImageByPath(file.path));
+              .onClick(() => {
+                void this.sendImageByPath(file.path);
+              });
           });
         } else {
           return;
@@ -819,16 +827,12 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         ev.preventDefault();
         ev.stopPropagation();
         menu.showAtMouseEvent(ev);
-      });
-    });
+        return;
+      }
 
-    // Embedded PDFs in reading view
-    el.querySelectorAll(".internal-embed, .pdf-embed").forEach((node) => {
-      const embed = node as HTMLElement;
-      if (embed.dataset.ttrpgScreenPdfBound === "true") return;
-      embed.dataset.ttrpgScreenPdfBound = "true";
-
-      embed.addEventListener("contextmenu", (ev) => {
+      // Embedded PDFs in reading view
+      const embed = target.closest(".internal-embed, .pdf-embed");
+      if (embed instanceof HTMLElement && el.contains(embed)) {
         const src =
           embed.getAttribute("src") ??
           embed.getAttribute("data-path") ??
@@ -839,9 +843,6 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         if (!(file instanceof TFile)) return;
         if (!isPdfExt(file.extension?.toLowerCase() ?? "")) return;
 
-        ev.preventDefault();
-        ev.stopPropagation();
-
         const menu = new Menu();
         menu.addItem((item) => {
           item
@@ -849,35 +850,27 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
             .setIcon("file-text")
             .onClick(() => void this.sendPdfByPath(file.path));
         });
+        ev.preventDefault();
+        ev.stopPropagation();
         menu.showAtMouseEvent(ev);
-      });
-    });
+        return;
+      }
 
-    // Headings in reading view: determine global index within the preview container
-    if (markdownFile) {
-      const cache = this.app.metadataCache.getFileCache(markdownFile);
-      const headings = (cache?.headings ?? []) as HeadingCacheEntry[];
-      const headingEls = Array.from(
-        el.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6"),
-      );
-
-      headingEls.forEach((headingEl) => {
-        if (headingEl.dataset.ttrpgScreenHeadingBound === "true") return;
-        headingEl.dataset.ttrpgScreenHeadingBound = "true";
-
-        headingEl.addEventListener("contextmenu", (ev) => {
+      // Headings in reading view: determine global index within the preview container
+      if (markdownFile) {
+        const headingEl = target.closest("h1, h2, h3, h4, h5, h6");
+        if (headingEl instanceof HTMLElement && el.contains(headingEl)) {
           const previewRoot = headingEl.closest(".markdown-preview-view, .markdown-rendered");
           if (!(previewRoot instanceof HTMLElement)) return;
 
+          const cache = this.app.metadataCache.getFileCache(markdownFile);
+          const headings = (cache?.headings ?? []) as HeadingCacheEntry[];
           const allHeadingEls = Array.from(
             previewRoot.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6"),
           );
           const idx = allHeadingEls.indexOf(headingEl);
           const headingInfo = idx >= 0 ? headings[idx] : undefined;
           if (!headingInfo) return;
-
-          ev.preventDefault();
-          ev.stopPropagation();
 
           const menu = new Menu();
           menu.addItem((item) => {
@@ -888,18 +881,17 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
                 void this.sendHeadingSection(markdownFile, headingInfo, headings);
               });
           });
+
+          ev.preventDefault();
+          ev.stopPropagation();
           menu.showAtMouseEvent(ev);
-        });
-      });
-    }
+          return;
+        }
+      }
 
-    // Paragraphs / list items / blockquotes → send text block
-    el.querySelectorAll("p, li, blockquote").forEach((node) => {
-      const blockEl = node as HTMLElement;
-      if (blockEl.dataset.ttrpgScreenBound === "true") return;
-      blockEl.dataset.ttrpgScreenBound = "true";
-
-      blockEl.addEventListener("contextmenu", (ev) => {
+      // Paragraphs / list items / blockquotes → send text block
+      const blockEl = target.closest("p, li, blockquote");
+      if (blockEl instanceof HTMLElement && el.contains(blockEl)) {
         const text = (blockEl.textContent ?? "").trim();
         if (!text) return;
 
@@ -916,7 +908,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
             });
         });
         menu.showAtMouseEvent(ev);
-      });
+      }
     });
   }
 
