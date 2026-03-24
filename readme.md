@@ -54,6 +54,10 @@ It is designed for tabletop and GM use cases and works especially well together 
 - Detects markdown that only contains a `zoommap` code block
 - Adds a special CSS class so map views can be centered and made non-interactive on the player screen
 
+### Fog of War (New Feature)
+- A dedicated Fog of War controller lets you mask and unmask parts of images or maps to reveal or hide information from the players.
+- Credit goes to TomtheHoff for allowing me to use parts of his code: https://github.com/TomtheHoff/Obsidian_fog-of-war
+
 ## Commands
 
 - **Open screen window**
@@ -93,6 +97,8 @@ await plugin.sendImageByPath(pathOrSource);
 ```ts
 await plugin.sendPdfByPath(pathOrSource);
 ```
+
+## 
 
 ## Intended use
 

@@ -1,25 +1,33 @@
 /* Plain screen display view */
 
-.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .view-header {
-  display: none !important;
-}
-
-.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .view-content {
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .view-content,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-fog-controller"] .view-content {
   padding: 16px !important;
   height: 100% !important;
   box-sizing: border-box !important;
+  background: var(--background-primary) !important;
 }
 
 .workspace-leaf-content[data-type="ttrpg-tools-screen-view"] {
   --file-line-width: 100%;
 }
 
-.ttrpg-tools-screen-view {
+.ttrpg-tools-screen-view,
+.ttrpg-tools-screen-fog-controller {
   width: 100%;
   height: 100%;
-  overflow: auto;
   box-sizing: border-box;
   background: var(--background-primary);
+}
+
+.ttrpg-tools-screen-view {
+  overflow: auto;
+}
+
+.ttrpg-tools-screen-fog-controller {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .ttrpg-tools-screen-markdown {
@@ -28,6 +36,10 @@
   min-height: 100%;
   padding: 0;
   margin: 0;
+}
+
+.ttrpg-tools-screen-stage {
+  position: relative;
 }
 
 .ttrpg-tools-screen-markdown--map {
@@ -58,6 +70,13 @@
   margin: 0 !important;
 }
 
+.ttrpg-tools-screen-media-stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  max-height: 100%;
+}
+
 .ttrpg-tools-screen-media img {
   max-width: 100%;
   max-height: 100%;
@@ -75,7 +94,7 @@
   width: 100%;
   height: 100%;
   border: 0;
-  background: #fff;
+  background: var(--background-primary);
 }
 
 .ttrpg-tools-screen-view img,
@@ -106,4 +125,49 @@
   margin: 0 !important;
   padding: 0 !important;
   max-width: 100% !important;
+}
+
+.ttrpg-tools-screen-fog-layer {
+  position: absolute;
+  z-index: 40;
+  background: transparent;
+}
+
+.ttrpg-tools-screen-fog-layer--interactive {
+  pointer-events: auto !important;
+  cursor: none;
+}
+
+.ttrpg-tools-screen-fog-brush {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 41;
+  border: 2px solid var(--text-muted);
+  border-radius: 9999px;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.ttrpg-tools-screen-fog-controller__target {
+  margin-bottom: 10px;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.ttrpg-tools-screen-fog-controller__controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  flex: 0 0 auto;
+}
+
+.ttrpg-tools-screen-fog-controller__render {
+  position: relative;
+  width: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
 }
