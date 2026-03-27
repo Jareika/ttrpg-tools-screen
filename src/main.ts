@@ -1,5 +1,8 @@
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import type { FuzzyMatch } from "obsidian";
 import {
   Component,
+  FuzzySuggestModal,
   ItemView,
   MarkdownRenderer,
   Menu,
@@ -7,6 +10,7 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
+  requestUrl,
   TFile,
   WorkspaceLeaf,
 } from "obsidian";
@@ -57,7 +61,7 @@ interface RenderBox {
 }
 
 const SCREEN_VIEW_TYPE = "ttrpg-tools-screen-view";
-const SCREEN_FOG_CONTROLLER_VIEW_TYPE = "ttrpg-tools-screen-fog-controller";
+const SCREEN_CONTROLLER_VIEW_TYPE = "ttrpg-tools-screen-controller";
 
 interface ScreenFogState {
   enabled: true;
@@ -65,11 +69,155 @@ interface ScreenFogState {
   label?: string;
 }
 
+interface PdfTabState {
+  currentPage: number;
+  zoom: number;
+  pageCount: number;
+  ready: boolean;
+}
+
+interface ScreenControllerItem {
+  id: string;
+  title: string;
+  payload: ScreenPayload;
+  signature: string;
+  createdAt: number;
+  pdfState?: PdfTabState;
+}
+
+type VideoScreenPayload = Extract<ScreenPayload, { kind: "video" }>;
+type PdfScreenPayload = Extract<ScreenPayload, { kind: "pdf" }>;
+
+interface VideoPlaybackSnapshot {
+  source: string;
+  filePath?: string;
+  duration: number | null;
+  currentTime: number;
+  paused: boolean;
+  loop: boolean;
+  muted: boolean;
+  volume: number;
+  playbackRate: number;
+  ready: boolean;
+  ended: boolean;
+}
+
+interface PdfPlaybackSnapshot {
+  source: string;
+  filePath?: string;
+  pageCount: number;
+  currentPage: number;
+  zoom: number;
+  ready: boolean;
+}
+
+interface PdfJsGlobalWorkerOptions {
+  workerSrc: string;
+}
+
+interface PdfJsViewport {
+  width: number;
+  height: number;
+}
+
+interface PdfJsRenderTask {
+  promise: Promise<void>;
+}
+
+interface PdfJsPageProxy {
+  rotate: number;
+  getViewport(params: { scale: number }): PdfJsViewport;
+  render(params: {
+    canvasContext: CanvasRenderingContext2D;
+    viewport: PdfJsViewport;
+  }): PdfJsRenderTask;
+}
+
+interface PdfJsDocumentProxy {
+  numPages: number;
+  getPage(pageNumber: number): Promise<PdfJsPageProxy>;
+}
+
+interface PdfJsLoadingTask {
+  promise: Promise<PdfJsDocumentProxy>;
+}
+
+interface PdfJsDocumentInit {
+  data: Uint8Array;
+  disableWorker?: boolean;
+  standardFontDataUrl?: string;
+  cMapUrl?: string;
+  cMapPacked?: boolean;
+  wasmUrl?: string;
+  iccUrl?: string;
+  disableFontFace?: boolean;
+  useWorkerFetch?: boolean;
+  useSystemFonts?: boolean;
+  verbosity?: number;
+}
+
+interface PdfJsModule {
+  version?: string;
+  GlobalWorkerOptions: PdfJsGlobalWorkerOptions;
+  getDocument(params: PdfJsDocumentInit): PdfJsLoadingTask;
+}
+
+type VideoControlCommand =
+  | { type: "play" }
+  | { type: "pause" }
+  | { type: "toggle-play" }
+  | { type: "restart" }
+  | { type: "seek"; time: number }
+  | { type: "set-loop"; loop: boolean }
+  | { type: "set-muted"; muted: boolean }
+  | { type: "set-volume"; volume: number };
+  
+type PdfControlCommand =
+  | { type: "next-page" }
+  | { type: "prev-page" }
+  | { type: "set-page"; page: number }
+  | { type: "set-zoom"; zoom: number };
+  
+const pdfjs = pdfjsLib as unknown as PdfJsModule;
+
+function getPdfJsVersion(): string {
+  return typeof pdfjs.version === "string" && pdfjs.version.trim()
+    ? pdfjs.version.trim()
+    : "4.10.38";
+}
+
+function getPdfJsCdnBaseUrl(): string {
+  return `https://cdn.jsdelivr.net/npm/pdfjs-dist@${getPdfJsVersion()}/`;
+}
+
+let pdfJsWorkerInitPromise: Promise<void> | null = null;
+
+function getPdfJsWorkerSrc(): string {
+  return `${getPdfJsCdnBaseUrl()}legacy/build/pdf.worker.min.mjs`;
+}
+
+function getPdfJsWasmUrl(): string {
+  return `${getPdfJsCdnBaseUrl()}wasm/`;
+}
+
+async function ensurePdfJsWorkerConfigured(): Promise<void> {
+  if (pdfjs.GlobalWorkerOptions.workerSrc) return;
+
+  if (!pdfJsWorkerInitPromise) {
+    pdfJsWorkerInitPromise = (async () => {
+      pdfjs.GlobalWorkerOptions.workerSrc = getPdfJsWorkerSrc();
+    })();
+  }
+
+  await pdfJsWorkerInitPromise;
+}
+
 type ScreenPayload =
   | { kind: "note"; path: string; fog?: ScreenFogState }
   | { kind: "markdown"; markdown: string; sourcePath: string; fog?: ScreenFogState }
   | { kind: "image"; source: string; filePath?: string; fog?: ScreenFogState }
-  | { kind: "pdf"; source: string; filePath?: string; fog?: ScreenFogState };
+  | { kind: "video"; source: string; filePath?: string }
+  | { kind: "pdf"; source: string; filePath?: string };
 
 interface HeadingCacheEntry {
   heading: string;
@@ -104,7 +252,65 @@ function isScreenPayload(x: unknown): x is ScreenPayload {
   }
   if (x.kind === "image") return typeof x.source === "string";
   if (x.kind === "pdf") return typeof x.source === "string";
+  if (x.kind === "video") return typeof x.source === "string";
   return false;
+}
+
+function isPdfPayload(payload: ScreenPayload | null | undefined): payload is PdfScreenPayload {
+  return payload?.kind === "pdf";
+}
+
+function getPayloadFog(payload: ScreenPayload | null | undefined): ScreenFogState | null {
+  if (!payload) return null;
+  if (!("fog" in payload)) return null;
+  return isScreenFogState(payload.fog) ? payload.fog : null;
+}
+
+function isVideoPayload(payload: ScreenPayload | null | undefined): payload is VideoScreenPayload {
+  return payload?.kind === "video";
+}
+
+function isTransparentCssColor(value: string): boolean {
+  const normalized = value.replace(/\s+/g, "").toLowerCase();
+  return (
+    normalized === "" ||
+    normalized === "transparent" ||
+    normalized === "rgba(0,0,0,0)"
+  );
+}
+
+type VaultMediaPickerMode = "all" | "image" | "video" | "pdf";
+
+function mediaMatchesMode(file: TFile, mode: VaultMediaPickerMode): boolean {
+  const ext = file.extension?.toLowerCase() ?? "";
+  if (mode === "image") return isImageExt(ext);
+  if (mode === "video") return isVideoExt(ext);
+  if (mode === "pdf") return isPdfExt(ext);
+  return isImageExt(ext) || isVideoExt(ext) || isPdfExt(ext);
+}
+
+function getMediaPickerPlaceholder(mode: VaultMediaPickerMode): string {
+  if (mode === "image") return "Search images to send to the player screen...";
+  if (mode === "video") return "Search videos to send to the player screen...";
+  if (mode === "pdf") return "Search PDFs to send to the player screen...";
+  return "Search images, videos, and PDFs to send to the player screen...";
+}
+
+function formatTimecode(totalSeconds: number | null | undefined): string {
+  if (typeof totalSeconds !== "number" || !Number.isFinite(totalSeconds) || totalSeconds < 0) {
+    return "0:00";
+  }
+
+  const whole = Math.floor(totalSeconds);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const seconds = whole % 60;
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function isImageExt(ext: string): boolean {
@@ -113,6 +319,10 @@ function isImageExt(ext: string): boolean {
 
 function isPdfExt(ext: string): boolean {
   return ext === "pdf";
+}
+
+function isVideoExt(ext: string): boolean {
+  return ["mp4", "webm", "ogv", "mov", "m4v"].includes(ext);
 }
 
 function stripFrontmatter(text: string): string {
@@ -139,6 +349,16 @@ function setCssProps(el: HTMLElement, props: Record<string, string | null>): voi
   }
 }
 
+function clampPdfPage(page: number, pageCount: number): number {
+  const safeCount = Math.max(1, Math.round(pageCount));
+  if (!Number.isFinite(page)) return 1;
+  return Math.min(safeCount, Math.max(1, Math.round(page)));
+}
+
+function clonePdfTabState(state: PdfTabState): PdfTabState {
+  return { ...state };
+}
+
 abstract class BaseRenderedScreenView extends ItemView {
   protected plugin: TTRPGToolsScreenPlugin;
   protected renderComponent: Component | null = null;
@@ -146,6 +366,8 @@ abstract class BaseRenderedScreenView extends ItemView {
   protected stageEl: HTMLElement | null = null;
   protected fogOverlay: ScreenFogOverlay | null = null;
   private stageSizeObserver: ResizeObserver | null = null;
+  
+  protected onRenderReset(): void {}
 
   constructor(leaf: WorkspaceLeaf, plugin: TTRPGToolsScreenPlugin) {
     super(leaf);
@@ -162,6 +384,10 @@ abstract class BaseRenderedScreenView extends ItemView {
   protected onStageSizeApplied(_box: RenderBox): void {
     // subclasses may hook
   }
+  
+  protected onVideoElementCreated(_video: HTMLVideoElement): void {
+    // subclasses may hook
+  }
 
   public refreshStageSizeVars(): void {
     this.applyStageSizeVars();
@@ -174,11 +400,7 @@ abstract class BaseRenderedScreenView extends ItemView {
 
   async setPayload(payload: ScreenPayload): Promise<void> {
     const statePayload = payload;
-    const nextType =
-      statePayload.fog?.enabled && this.isFogInteractive()
-        ? SCREEN_FOG_CONTROLLER_VIEW_TYPE
-        : SCREEN_VIEW_TYPE;
-
+    const nextType = this.getViewType();
     await this.leaf.setViewState({
       type: nextType,
       active: true,
@@ -198,7 +420,8 @@ abstract class BaseRenderedScreenView extends ItemView {
   }
 
   async renderPayload(payload: ScreenPayload): Promise<void> {
-    this.renderComponent?.unload();
+    this.onRenderReset();
+	this.renderComponent?.unload();
     this.renderComponent = null;
     this.fogOverlay?.destroy();
     this.fogOverlay = null;
@@ -234,6 +457,11 @@ abstract class BaseRenderedScreenView extends ItemView {
       await this.setupFogIfNeeded(payload);
       return;
     }
+	
+    if (payload.kind === "video") {
+      this.renderVideo(host, payload.source);
+      return;
+    }
 
     if (payload.kind === "pdf") {
       this.renderPdf(host, payload.source);
@@ -242,20 +470,22 @@ abstract class BaseRenderedScreenView extends ItemView {
   }
 
   async onFogMaskUpdated(key: string, dataUrl: string | null): Promise<void> {
-    if (!this.renderedPayload?.fog?.enabled) return;
-    if (this.renderedPayload.fog.key !== key) return;
+    const fog = getPayloadFog(this.renderedPayload);
+    if (!fog) return;
+    if (fog.key !== key) return;
     await this.fogOverlay?.applyMaskFromDataUrl(dataUrl);
   }
 
   private async setupFogIfNeeded(payload: ScreenPayload): Promise<void> {
-    if (!payload.fog?.enabled) return;
+    const fog = getPayloadFog(payload);
+    if (!fog) return;
     if (!this.stageEl) return;
 
     this.fogOverlay = new ScreenFogOverlay(
       this.plugin,
       this,
       this.stageEl,
-      payload.fog,
+      fog,
       this.isFogInteractive(),
     );
     await this.fogOverlay.attach();
@@ -268,6 +498,21 @@ abstract class BaseRenderedScreenView extends ItemView {
     img.src = source;
     this.stageEl = stage;
 	this.installStageSizeSync();
+  }
+  
+  protected renderVideo(host: HTMLElement, source: string): void {
+    const wrap = host.createDiv({ cls: "ttrpg-tools-screen-media" });
+    const stage = wrap.createDiv({ cls: "ttrpg-tools-screen-media-stage ttrpg-tools-screen-stage" });
+    const video = stage.createEl("video");
+    video.src = source;
+    video.autoplay = true;
+    video.loop = false;
+    video.controls = false;
+    video.playsInline = true;
+    video.preload = "auto";
+	this.onVideoElementCreated(video);
+    this.stageEl = stage;
+    this.installStageSizeSync();
   }
 
   protected renderPdf(host: HTMLElement, source: string): void {
@@ -302,8 +547,8 @@ abstract class BaseRenderedScreenView extends ItemView {
     this.installInternalLinkHandling(wrapper, sourcePath);
 	this.installStageSizeSync();
   }
-  
-  private installStageSizeSync(): void {
+
+  protected installStageSizeSync(): void {
     this.teardownStageSizeSync();
     if (!this.stageEl) return;
 
@@ -374,6 +619,8 @@ abstract class BaseRenderedScreenView extends ItemView {
           void this.plugin.sendPdfByPath(file.path);
         } else if (isImageExt(ext)) {
           void this.plugin.sendImageByPath(file.path);
+        } else if (isVideoExt(ext)) {
+          void this.plugin.sendVideoByPath(file.path);
         }
       },
       { capture: true },
@@ -395,7 +642,7 @@ class ScreenFogOverlay {
   private overlayMode: "map" | "media" = "media";
   private brushPreviewEl: HTMLDivElement | null = null;
   private resizeObserver: ResizeObserver | null = null;
-  private publishTimer: number | null = null;
+  private hasUnpublishedChanges = false;
   private mapWorldEl: HTMLElement | null = null;
   private worldMaskCanvas: HTMLCanvasElement | null = null;
   private worldMaskCtx: CanvasRenderingContext2D | null = null;
@@ -513,10 +760,6 @@ class ScreenFogOverlay {
   }
 
   destroy(): void {
-    if (this.publishTimer !== null) {
-      window.clearTimeout(this.publishTimer);
-      this.publishTimer = null;
-    }
     if (this.mapRenderRaf !== null) {
       window.cancelAnimationFrame(this.mapRenderRaf);
       this.mapRenderRaf = null;
@@ -538,6 +781,45 @@ class ScreenFogOverlay {
     this.worldMaskInitialized = false;
     this.pendingMaskDataUrl = undefined;
   }
+  
+  private collectBackgroundSources(start: HTMLElement | null, maxDepth = 5): HTMLElement[] {
+    const out: HTMLElement[] = [];
+    let cur: HTMLElement | null = start;
+    let depth = 0;
+
+    while (cur && depth < maxDepth) {
+      out.push(cur);
+      cur = cur.parentElement;
+      depth += 1;
+    }
+
+    return out;
+  }
+  
+  private getFogFillStyle(): string {
+    const sources: Array<HTMLElement | null> = [
+      ...this.collectBackgroundSources(this.overlayHostEl, 6),
+      ...this.collectBackgroundSources(this.targetEl, 4),
+      ...this.collectBackgroundSources(this.stageEl, 6),
+      this.overlayHostEl?.ownerDocument.body ?? null,
+      this.overlayHostEl?.ownerDocument.documentElement ?? null,
+    ];
+
+    for (const source of sources) {
+      if (!(source instanceof HTMLElement)) continue;
+      const win = source.ownerDocument.defaultView ?? window;
+      const bg = win.getComputedStyle(source).backgroundColor;
+      if (!isTransparentCssColor(bg)) {
+        return bg;
+      }
+    }
+
+    return "black";
+  }
+
+  private getFogCoverFillStyle(): string {
+    return this.getFogFillStyle();
+  }
 
   async applyMaskFromDataUrl(dataUrl: string | null | undefined): Promise<void> {
     if (this.overlayMode === "map") {
@@ -557,27 +839,26 @@ class ScreenFogOverlay {
     const rect = this.getCanvasCssRect();
     if (!rect || rect.width < 2 || rect.height < 2) return;
 
-    this.ctx.globalCompositeOperation = "source-over";
-    this.ctx.clearRect(0, 0, rect.width, rect.height);
-
     if (!dataUrl) {
       this.fillFullFogViewport();
       return;
     }
 
-    const img = new Image();
-    const ok = await new Promise<boolean>((resolve) => {
-      img.onload = () => resolve(true);
-      img.onerror = () => resolve(false);
+    const loaded = await new Promise<HTMLImageElement | null>((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
       img.src = dataUrl;
     });
 
-    if (!ok) {
+    if (!loaded) {
       this.fillFullFogViewport();
       return;
     }
 
-    this.ctx.drawImage(img, 0, 0, rect.width, rect.height);
+    this.ctx.globalCompositeOperation = "source-over";
+    this.ctx.clearRect(0, 0, rect.width, rect.height);
+    this.ctx.drawImage(loaded, 0, 0, rect.width, rect.height);
   }
 
   async fillFullFogAndPublish(): Promise<void> {
@@ -587,6 +868,7 @@ class ScreenFogOverlay {
     } else {
       this.fillFullFogViewport();
     }
+	this.hasUnpublishedChanges = true;
     await this.publishNow();
   }
 
@@ -601,6 +883,7 @@ class ScreenFogOverlay {
       if (!rect) return;
       this.ctx.clearRect(0, 0, rect.width, rect.height);
     }
+	this.hasUnpublishedChanges = true;
     await this.publishNow();
   }
 
@@ -740,7 +1023,6 @@ class ScreenFogOverlay {
       this.updateBrushPreviewPosition(ev);
       if (!this.isDrawing) return;
       this.applyBrushAtPointer(ev, this.activeTool);
-      this.schedulePublish();
     });
 
     this.canvasEl.addEventListener("pointerdown", (ev) => {
@@ -761,7 +1043,6 @@ class ScreenFogOverlay {
 
       this.applyBrushAtPointer(ev, this.activeTool);
       this.updateBrushPreviewPosition(ev);
-      this.schedulePublish();
     });
 
     const endDraw = (ev: PointerEvent) => {
@@ -772,7 +1053,7 @@ class ScreenFogOverlay {
       } catch {
         // ignore
       }
-      this.schedulePublish();
+	  void this.publishNow();
     };
 
     this.canvasEl.addEventListener("pointerup", endDraw);
@@ -799,30 +1080,24 @@ class ScreenFogOverlay {
       this.ctx.fill();
     } else {
       this.ctx.globalCompositeOperation = "source-over";
-      this.ctx.fillStyle = "black";
+	  this.ctx.fillStyle = this.getFogCoverFillStyle();
       this.ctx.beginPath();
       this.ctx.arc(x, y, this.brushRadius, 0, Math.PI * 2);
       this.ctx.fill();
     }
+	this.hasUnpublishedChanges = true;
     this.ctx.restore();
   }
 
-  private schedulePublish(): void {
-    if (this.publishTimer !== null) {
-      window.clearTimeout(this.publishTimer);
-    }
-    this.publishTimer = window.setTimeout(() => {
-      this.publishTimer = null;
-      void this.publishNow();
-    }, 75);
-  }
-
   private async publishNow(): Promise<void> {
+    if (!this.hasUnpublishedChanges) return;
+
     if (this.overlayMode === "map") {
       if (!this.worldMaskCanvas) return;
       try {
         const dataUrl = this.worldMaskCanvas.toDataURL("image/png");
         await this.plugin.setFogMask(this.fog.key, dataUrl, this.owner);
+		this.hasUnpublishedChanges = false;
       } catch {
         // ignore
       }
@@ -833,6 +1108,7 @@ class ScreenFogOverlay {
     try {
       const dataUrl = this.canvasEl.toDataURL("image/png");
       await this.plugin.setFogMask(this.fog.key, dataUrl, this.owner);
+	  this.hasUnpublishedChanges = false;
     } catch {
       // ignore
     }
@@ -1015,20 +1291,21 @@ class ScreenFogOverlay {
       return;
     }
 
-    const img = new Image();
-    const ok = await new Promise<boolean>((resolve) => {
-      img.onload = () => resolve(true);
-      img.onerror = () => resolve(false);
+    const loaded = await new Promise<HTMLImageElement | null>((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
       img.src = dataUrl;
     });
 
-    if (!ok) {
+    if (!loaded) {
       this.fillFullFogWorld();
       return;
     }
 
+    this.worldMaskCtx.clearRect(0, 0, this.worldMaskCanvas.width, this.worldMaskCanvas.height);
     this.worldMaskCtx.drawImage(
-      img,
+      loaded,
       0,
       0,
       this.worldMaskCanvas.width,
@@ -1059,7 +1336,7 @@ class ScreenFogOverlay {
     if (!rect) return;
     this.ctx.globalCompositeOperation = "source-over";
     this.ctx.clearRect(0, 0, rect.width, rect.height);
-    this.ctx.fillStyle = "black";
+    this.ctx.fillStyle = this.getFogFillStyle();
     this.ctx.fillRect(0, 0, rect.width, rect.height);
   }
 
@@ -1067,7 +1344,7 @@ class ScreenFogOverlay {
     if (!this.worldMaskCtx || !this.worldMaskCanvas) return;
     this.worldMaskCtx.globalCompositeOperation = "source-over";
     this.worldMaskCtx.clearRect(0, 0, this.worldMaskCanvas.width, this.worldMaskCanvas.height);
-    this.worldMaskCtx.fillStyle = "black";
+    this.worldMaskCtx.fillStyle = this.getFogFillStyle();
     this.worldMaskCtx.fillRect(0, 0, this.worldMaskCanvas.width, this.worldMaskCanvas.height);
   }
 
@@ -1097,15 +1374,252 @@ class ScreenFogOverlay {
       this.worldMaskCtx.fill();
     } else {
       this.worldMaskCtx.globalCompositeOperation = "source-over";
-      this.worldMaskCtx.fillStyle = "black";
+      this.worldMaskCtx.fillStyle = this.getFogCoverFillStyle();
       this.worldMaskCtx.beginPath();
       this.worldMaskCtx.arc(worldX, worldY, worldRadius, 0, Math.PI * 2);
       this.worldMaskCtx.fill();
     }
+	this.hasUnpublishedChanges = true;
     this.worldMaskCtx.restore();
 
     this.worldMaskInitialized = true;
     this.renderWorldMaskToViewport();
+  }
+}
+
+class ScreenPdfRenderer {
+  private app: App;
+  private hostEl: HTMLElement;
+  private payload: PdfScreenPayload;
+  private canvasEl: HTMLCanvasElement;
+  private hintEl: HTMLDivElement;
+  private ctx: CanvasRenderingContext2D | null;
+  private resizeObserver: ResizeObserver | null = null;
+  private pdfDoc: PdfJsDocumentProxy | null = null;
+  private disposed = false;
+  private renderToken = 0;
+  private currentPage = 1;
+  private renderQueue: Promise<void> = Promise.resolve();
+  private scheduledRenderId = 0;
+  private hasDeliveredInitialSnapshot = false;
+  private resizeRaf: number | null = null;
+  private standardFontDataUrl: string;
+  private wasmUrl: string;
+  private cMapUrl: string;
+
+  private zoom = 1;
+  private pageCount = 0;
+  private emitSnapshots: boolean;
+  private initialState: PdfTabState | null;
+  private onSnapshot: (snapshot: PdfPlaybackSnapshot | null) => void;
+
+  constructor(
+    app: App,
+    hostEl: HTMLElement,
+    payload: PdfScreenPayload,
+    onSnapshot: (snapshot: PdfPlaybackSnapshot | null) => void,
+	initialState: PdfTabState | null = null,
+	emitSnapshots = true,
+  ) {
+	this.app = app;
+    this.hostEl = hostEl;
+    this.payload = payload;
+    this.onSnapshot = onSnapshot;
+    this.standardFontDataUrl = `${getPdfJsCdnBaseUrl()}standard_fonts/`;
+	this.wasmUrl = getPdfJsWasmUrl();
+    this.cMapUrl = `${getPdfJsCdnBaseUrl()}cmaps/`;
+	this.emitSnapshots = emitSnapshots;
+	this.initialState = initialState ? clonePdfTabState(initialState) : null;
+
+    const wrap = this.hostEl.createDiv({ cls: "ttrpg-tools-screen-pdf" });
+    this.canvasEl = wrap.createEl("canvas", { cls: "ttrpg-tools-screen-pdf__canvas" });
+    this.hintEl = wrap.createDiv({
+      cls: "ttrpg-tools-screen-pdf__hint",
+      text: "Loading PDF…",
+    });
+    this.ctx = this.canvasEl.getContext("2d");
+  }
+
+  async load(): Promise<void> {
+    try {
+	  await ensurePdfJsWorkerConfigured();
+
+      let buffer: ArrayBuffer;
+      if (this.payload.filePath) {
+        buffer = await this.app.vault.adapter.readBinary(this.payload.filePath);
+      } else {
+        const response = await requestUrl({
+          url: this.payload.source,
+          method: "GET",
+        });
+        buffer = response.arrayBuffer;
+      }
+
+      const task = pdfjs.getDocument({
+        data: new Uint8Array(buffer),
+        disableWorker: false,
+		disableFontFace: true,
+        standardFontDataUrl: this.standardFontDataUrl,
+        cMapUrl: this.cMapUrl,
+        cMapPacked: true,
+		wasmUrl: this.wasmUrl,
+        useWorkerFetch: true,
+        useSystemFonts: false,
+		verbosity: 0,
+      });
+      this.pdfDoc = await task.promise;
+      if (this.disposed) return;
+      this.pageCount = this.pdfDoc.numPages ?? 0;
+
+      if (this.initialState) {
+        this.currentPage = clampPdfPage(this.initialState.currentPage, this.pageCount);
+        this.zoom = Math.min(3, Math.max(0.25, this.initialState.zoom));
+      } else {
+        this.currentPage = clampPdfPage(this.currentPage, this.pageCount);
+      }
+
+      await this.requestRender(true);
+
+      this.resizeObserver = new ResizeObserver(() => {
+        this.scheduleResizeRender();
+      });
+      this.resizeObserver.observe(this.hostEl);
+    } catch (err) {
+      console.error(err);
+      this.hintEl.textContent = "PDF could not be loaded.";
+      this.onSnapshot(null);
+    }
+  }
+
+  destroy(): void {
+    this.disposed = true;
+    this.resizeObserver?.disconnect();
+    if (this.resizeRaf !== null) {
+      window.cancelAnimationFrame(this.resizeRaf);
+      this.resizeRaf = null;
+    }
+    this.resizeObserver = null;
+    this.onSnapshot(null);
+  }
+  
+  async syncToSnapshot(snapshot: PdfPlaybackSnapshot | null): Promise<void> {
+    if (!snapshot) return;
+    if (!this.pdfDoc || this.disposed) return;
+	if (!snapshot.ready) return;
+
+    const nextPage = clampPdfPage(snapshot.currentPage, this.pageCount);
+    const nextZoom = Math.min(3, Math.max(0.25, snapshot.zoom));
+    const nextPageCount = Math.max(1, snapshot.pageCount);
+
+    if (nextPageCount !== this.pageCount) {
+      this.pageCount = nextPageCount;
+    }
+    if (this.initialState) {
+      this.initialState = { currentPage: nextPage, zoom: nextZoom, pageCount: nextPageCount, ready: snapshot.ready };
+    }
+
+    if (nextPage === this.currentPage && Math.abs(nextZoom - this.zoom) < 0.001) {
+      return;
+    }
+
+    this.currentPage = nextPage;
+    this.zoom = nextZoom;
+    await this.requestRender(false);
+  }
+
+  async applyCommand(command: PdfControlCommand): Promise<void> {
+    if (!this.pdfDoc) return;
+
+    if (command.type === "next-page") {
+      this.currentPage = Math.min(this.pageCount, this.currentPage + 1);
+    } else if (command.type === "prev-page") {
+      this.currentPage = Math.max(1, this.currentPage - 1);
+    } else if (command.type === "set-page") {
+      this.currentPage = clampPdfPage(command.page, this.pageCount);
+    } else if (command.type === "set-zoom") {
+      this.zoom = Math.min(3, Math.max(0.25, command.zoom));
+    }
+
+    await this.requestRender();
+  }
+
+  private scheduleResizeRender(): void {
+    if (this.resizeRaf !== null) return;
+
+    this.resizeRaf = window.requestAnimationFrame(() => {
+      this.resizeRaf = null;
+      void this.requestRender(false);
+    });
+  }
+
+  private async requestRender(emitSnapshot = this.emitSnapshots): Promise<void> {
+    const requestId = ++this.scheduledRenderId;
+
+    this.renderQueue = this.renderQueue
+      .catch(() => {
+        // ignore previous render failures in queue chaining
+      })
+      .then(async () => {
+        if (this.disposed) return;
+        await this.renderCurrentPage(requestId, emitSnapshot);
+      });
+
+    await this.renderQueue;
+  }
+
+  private async renderCurrentPage(requestId: number, emitSnapshot = this.emitSnapshots): Promise<void> {
+    if (!this.pdfDoc || !this.ctx || this.disposed) return;
+
+    const token = ++this.renderToken;
+    const page = await this.pdfDoc.getPage(this.currentPage);
+    if (this.disposed || token !== this.renderToken) return;
+
+    const unscaled = page.getViewport({ scale: 1 });
+    const availW = Math.max(200, this.hostEl.clientWidth - 24);
+    const availH = Math.max(200, this.hostEl.clientHeight - 24);
+    const fitScale = Math.min(availW / unscaled.width, availH / unscaled.height);
+    const cssScale = Math.max(0.1, fitScale) * this.zoom;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+	
+    if (requestId !== this.scheduledRenderId) {
+      return;
+    }
+
+    const viewport = page.getViewport({ scale: cssScale * dpr });
+    const cssViewport = page.getViewport({ scale: cssScale });
+
+    this.canvasEl.width = Math.max(1, Math.round(viewport.width));
+    this.canvasEl.height = Math.max(1, Math.round(viewport.height));
+    this.canvasEl.style.width = `${Math.round(cssViewport.width)}px`;
+    this.canvasEl.style.height = `${Math.round(cssViewport.height)}px`;
+
+    this.hintEl.textContent = `Page ${this.currentPage} / ${this.pageCount}`;
+
+    await page.render({
+      canvasContext: this.ctx,
+      viewport,
+    }).promise;
+
+    if (
+      this.disposed ||
+      token !== this.renderToken ||
+      requestId !== this.scheduledRenderId ||
+      !emitSnapshot
+    ) {
+      return;
+    }
+
+    this.onSnapshot(
+      {
+        source: this.payload.source,
+        filePath: this.payload.filePath,
+        pageCount: this.pageCount,
+		ready: true,
+        currentPage: this.currentPage,
+        zoom: this.zoom,
+      },
+    );
+	this.hasDeliveredInitialSnapshot = true;
   }
 }
 
@@ -1114,6 +1628,10 @@ class ScreenDisplayView extends BaseRenderedScreenView {
   private windowTrackTimer: number | null = null;
   private lastTrackedBounds: WindowBounds | null = null;
   private lastTrackedWindow: Window | null = null;
+  private trackedVideoEl: HTMLVideoElement | null = null;
+  private videoTrackAbort: AbortController | null = null;
+  private trackedPdfRenderer: ScreenPdfRenderer | null = null;
+  private videoStateRaf: number | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: TTRPGToolsScreenPlugin) {
     super(leaf);
@@ -1138,6 +1656,180 @@ class ScreenDisplayView extends BaseRenderedScreenView {
 
   protected isFogInteractive(): boolean {
     return false;
+  }
+  
+  protected override onRenderReset(): void {
+    const wasVideo = isVideoPayload(this.renderedPayload);
+	const wasPdf = isPdfPayload(this.renderedPayload);
+    this.teardownVideoTracking();
+	this.teardownPdfTracking();
+    if (wasVideo) {
+      void this.plugin.updateVideoSnapshot(null);
+    } else if (wasPdf) {
+      void this.plugin.updatePdfSnapshot(null);
+    }
+  }
+
+  protected override onVideoElementCreated(video: HTMLVideoElement): void {
+    this.attachVideoTracking(video);
+  }
+
+  private attachVideoTracking(video: HTMLVideoElement): void {
+    this.teardownVideoTracking();
+
+    this.trackedVideoEl = video;
+    this.videoTrackAbort = new AbortController();
+
+    const signal = this.videoTrackAbort.signal;
+    const onAny = () => this.scheduleVideoStatePush();
+    const events = [
+      "loadedmetadata",
+      "loadeddata",
+      "durationchange",
+      "timeupdate",
+      "play",
+      "pause",
+      "ended",
+      "volumechange",
+      "ratechange",
+      "seeking",
+      "seeked",
+      "canplay",
+      "canplaythrough",
+      "waiting",
+      "stalled",
+      "emptied",
+    ] as const;
+
+    for (const eventName of events) {
+      video.addEventListener(eventName, onAny, { signal });
+    }
+
+    void video.play().then(
+      () => this.scheduleVideoStatePush(),
+      () => this.scheduleVideoStatePush(),
+    );
+  }
+
+  private teardownVideoTracking(): void {
+    this.videoTrackAbort?.abort();
+    this.videoTrackAbort = null;
+    this.trackedVideoEl = null;
+    if (this.videoStateRaf !== null) {
+      window.cancelAnimationFrame(this.videoStateRaf);
+      this.videoStateRaf = null;
+    }
+  }
+
+  private teardownPdfTracking(): void {
+    this.trackedPdfRenderer?.destroy();
+    this.trackedPdfRenderer = null;
+  }
+
+  protected override renderPdf(host: HTMLElement, _source: string): void {
+    const payload = isPdfPayload(this.renderedPayload) ? this.renderedPayload : null;
+    if (!payload) return;
+    const wrap = host.createDiv({ cls: "ttrpg-tools-screen-media" });
+    const stage = wrap.createDiv({ cls: "ttrpg-tools-screen-media-stage ttrpg-tools-screen-stage" });
+    this.stageEl = stage;
+    this.installStageSizeSync();
+    this.trackedPdfRenderer = new ScreenPdfRenderer(
+      this.app,
+      stage,
+      payload,
+      (snapshot) => { void this.plugin.updatePdfSnapshot(snapshot); },
+      this.plugin.getActivePdfTabState(),
+    );
+    void this.trackedPdfRenderer.load().then(() => this.trackedPdfRenderer?.syncToSnapshot(this.plugin.getCurrentPdfSnapshot()));
+  }
+
+  public async applyPdfCommand(command: PdfControlCommand): Promise<void> {
+    await this.trackedPdfRenderer?.applyCommand(command);
+  }
+
+  private readVideoSnapshot(video: HTMLVideoElement): VideoPlaybackSnapshot | null {
+    const payload = isVideoPayload(this.renderedPayload) ? this.renderedPayload : null;
+    if (!payload) return null;
+    const duration =
+      Number.isFinite(video.duration) && video.duration >= 0
+        ? video.duration
+        : null;
+    return {
+      source: payload.source,
+      filePath: payload.filePath,
+      duration,
+      currentTime: Number.isFinite(video.currentTime) && video.currentTime >= 0 ? video.currentTime : 0,
+      paused: video.paused,
+      loop: video.loop,
+      muted: video.muted,
+      volume: Math.min(1, Math.max(0, video.volume)),
+      playbackRate: video.playbackRate,
+      ready: video.readyState >= 1,
+      ended: video.ended,
+    };
+  }
+
+  private scheduleVideoStatePush(): void {
+    if (this.videoStateRaf !== null) return;
+    this.videoStateRaf = window.requestAnimationFrame(() => {
+      this.videoStateRaf = null;
+      const video = this.trackedVideoEl;
+      if (!video) return;
+      const snapshot = this.readVideoSnapshot(video);
+      void this.plugin.updateVideoSnapshot(snapshot);
+    });
+  }
+
+  public async applyVideoCommand(command: VideoControlCommand): Promise<void> {
+    const video = this.trackedVideoEl;
+    if (!video) return;
+
+    if (command.type === "play") {
+      try {
+        await video.play();
+      } catch {
+        // ignore
+      }
+    } else if (command.type === "pause") {
+      video.pause();
+    } else if (command.type === "toggle-play") {
+      if (video.paused) {
+        try {
+          await video.play();
+        } catch {
+          // ignore
+        }
+      } else {
+        video.pause();
+      }
+    } else if (command.type === "restart") {
+      video.currentTime = 0;
+      if (video.ended) {
+        try {
+          await video.play();
+        } catch {
+          // ignore
+        }
+      }
+    } else if (command.type === "seek") {
+      const duration =
+        Number.isFinite(video.duration) && video.duration >= 0
+          ? video.duration
+          : null;
+      const next =
+        duration === null
+          ? Math.max(0, command.time)
+          : Math.min(duration, Math.max(0, command.time));
+      video.currentTime = next;
+    } else if (command.type === "set-loop") {
+      video.loop = command.loop;
+    } else if (command.type === "set-muted") {
+      video.muted = command.muted;
+    } else if (command.type === "set-volume") {
+      video.volume = Math.min(1, Math.max(0, command.volume));
+    }
+
+    this.scheduleVideoStatePush();
   }
 
   async onOpen(): Promise<void> {
@@ -1165,6 +1857,13 @@ class ScreenDisplayView extends BaseRenderedScreenView {
 	  this.renderComponent = null;
       this.fogOverlay?.destroy();
 	  this.teardownStageSizeSync();
+	  this.teardownPdfTracking();
+      this.teardownVideoTracking();
+      if (isVideoPayload(this.renderedPayload)) {
+        void this.plugin.updateVideoSnapshot(null);
+      } else if (isPdfPayload(this.renderedPayload)) {
+        void this.plugin.updatePdfSnapshot(null);
+      }
 	  this.persistCurrentWindowBounds();
 	  this.stopWindowTracking();
 
@@ -1320,33 +2019,70 @@ class ScreenDisplayView extends BaseRenderedScreenView {
   }
 }
 
-class ScreenFogControllerView extends BaseRenderedScreenView {
+class ScreenControllerView extends BaseRenderedScreenView {
+  private tabsEl: HTMLDivElement | null = null;
+  private statusEl: HTMLDivElement | null = null;
+  private controlsEl: HTMLDivElement | null = null;
+  private actionsEl: HTMLDivElement | null = null;
   private renderHostEl: HTMLDivElement | null = null;
-  private toolBtn: HTMLButtonElement | null = null;
-  private radiusInput: HTMLInputElement | null = null;
-  private radiusLabel: HTMLSpanElement | null = null;
-  private targetLabelEl: HTMLDivElement | null = null;
+
+  private playBtn: HTMLButtonElement | null = null;
+  private restartBtn: HTMLButtonElement | null = null;
+  private loopInput: HTMLInputElement | null = null;
+  private muteInput: HTMLInputElement | null = null;
+  private seekInput: HTMLInputElement | null = null;
+  private timeLabelEl: HTMLSpanElement | null = null;
+  private volumeInput: HTMLInputElement | null = null;
+  private currentVideoSnapshot: VideoPlaybackSnapshot | null = null;
+  private isScrubbing = false;
+  private scrubPreviewTime: number | null = null;
+
+  private fogToolBtn: HTMLButtonElement | null = null;
+  private fogRadiusInput: HTMLInputElement | null = null;
+  private fogRadiusLabel: HTMLSpanElement | null = null;
+
+  private pdfPrevBtn: HTMLButtonElement | null = null;
+  private pdfNextBtn: HTMLButtonElement | null = null;
+  private pdfPageInput: HTMLInputElement | null = null;
+  private pdfPageLabel: HTMLSpanElement | null = null;
+  private pdfZoomInput: HTMLInputElement | null = null;
+  private pdfPreviewRenderer: ScreenPdfRenderer | null = null;
+  private pdfZoomLabel: HTMLSpanElement | null = null;
+  private currentPdfSnapshot: PdfPlaybackSnapshot | null = null;
+  
+  private getCurrentPdfPageCount(): number {
+    return Math.max(
+      1,
+      this.currentPdfSnapshot?.pageCount ??
+      this.plugin.getActivePdfTabState()?.pageCount ??
+      1,
+    );
+  }
+
+  private getCurrentPdfPage(): number {
+    return clampPdfPage(Number(this.pdfPageInput?.value ?? "1"), this.getCurrentPdfPageCount());
+  }
 
   constructor(leaf: WorkspaceLeaf, plugin: TTRPGToolsScreenPlugin) {
     super(leaf, plugin);
   }
 
   getViewType(): string {
-    return SCREEN_FOG_CONTROLLER_VIEW_TYPE;
+    return SCREEN_CONTROLLER_VIEW_TYPE;
   }
 
   getDisplayText(): string {
-    return "Fog controller";
+    return "Player screen controller";
   }
 
-  getIcon(): "brush" {
-    return "brush";
+  getIcon(): "layout-dashboard" {
+    return "layout-dashboard";
   }
 
   protected getRenderHost(): HTMLElement {
     if (!this.renderHostEl) {
       this.renderHostEl = this.contentEl.createDiv({
-        cls: "ttrpg-tools-screen-fog-controller__render",
+        cls: "ttrpg-tools-screen-controller__render",
       });
     }
     return this.renderHostEl;
@@ -1356,19 +2092,47 @@ class ScreenFogControllerView extends BaseRenderedScreenView {
     return true;
   }
 
+  protected override getPreferredStageSize(): RenderBox | null {
+    return this.plugin.getCurrentScreenRenderSize();
+  }
+  
+  protected override onRenderReset(): void {
+    this.pdfPreviewRenderer?.destroy();
+    this.pdfPreviewRenderer = null;
+  }
+
   async onOpen(): Promise<void> {
     this.contentEl.empty();
-    this.contentEl.addClass("ttrpg-tools-screen-fog-controller");
+    this.contentEl.addClass("ttrpg-tools-screen-controller");
 
-    this.buildControls();
+    this.tabsEl = this.contentEl.createDiv({
+      cls: "ttrpg-tools-screen-controller__tabs",
+    });
+    this.statusEl = this.contentEl.createDiv({
+      cls: "ttrpg-tools-screen-controller__status",
+      text: "No item selected.",
+    });
+    this.actionsEl = this.contentEl.createDiv({
+      cls: "ttrpg-tools-screen-controller__actions",
+    });
+    const closeScreenBtn = this.actionsEl.createEl("button", {
+      text: "Close player screen",
+    });
+    closeScreenBtn.onclick = () => {
+      this.plugin.closeScreenWindow();
+    };
+    this.controlsEl = this.contentEl.createDiv({
+      cls: "ttrpg-tools-screen-controller__controls",
+    });
+    this.getRenderHost();
 
-    const payload = this.plugin.getCurrentFogPayload();
+    this.refreshTabs();
+
+    const payload = this.plugin.getCurrentPayload();
     if (payload) {
       await this.renderPayload(payload);
     } else {
-      this.getRenderHost().createEl("div", {
-        text: "Send an image or map to the player screen with fog of war first.",
-      });
+      this.showEmptyState();
     }
   }
 
@@ -1376,81 +2140,427 @@ class ScreenFogControllerView extends BaseRenderedScreenView {
     this.renderComponent?.unload();
     this.renderComponent = null;
     this.fogOverlay?.destroy();
-	this.teardownStageSizeSync();
-    this.plugin.notifyFogControllerLeafClosed(this.leaf);
+    this.pdfPreviewRenderer?.destroy();
+    this.pdfPreviewRenderer = null;
+    this.teardownStageSizeSync();
+    this.plugin.notifyControllerLeafClosed(this.leaf);
     return Promise.resolve();
   }
-  
-  protected override getPreferredStageSize(): RenderBox | null {
-    return this.plugin.getCurrentScreenRenderSize();
+
+  refreshTabs(): void {
+    if (!this.tabsEl) return;
+    this.tabsEl.empty();
+
+    const items = this.plugin.getControllerItems();
+    const currentId = this.plugin.getCurrentControllerItemId();
+
+    if (!items.length) {
+      this.tabsEl.createDiv({
+        cls: "ttrpg-tools-screen-controller__empty-tabs",
+        text: "No sent items yet.",
+      });
+      return;
+    }
+
+    for (const item of items) {
+      const tab = this.tabsEl.createDiv({
+        cls:
+          "ttrpg-tools-screen-controller__tab" +
+          (item.id === currentId ? " is-active" : ""),
+      });
+      const button = tab.createEl("button", {
+        cls: "ttrpg-tools-screen-controller__tab-main",
+        text: item.title,
+      });
+      button.onclick = () => {
+        void this.plugin.activateControllerItem(item.id);
+      };
+
+      const closeBtn = tab.createEl("button", {
+        cls: "ttrpg-tools-screen-controller__tab-close",
+        text: "×",
+      });
+      closeBtn.onclick = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        void this.plugin.closeControllerItem(item.id);
+      };
+    }
   }
 
-  private buildControls(): void {
-    this.targetLabelEl = this.contentEl.createEl("div", {
-      cls: "ttrpg-tools-screen-fog-controller__target",
-      text: "No fog target loaded.",
+  clearSelection(): void {
+    this.renderedPayload = null;
+    this.getRenderHost().empty();
+    this.showEmptyState();
+  }
+
+  onVideoStateUpdated(snapshot: VideoPlaybackSnapshot | null): void {
+    this.currentVideoSnapshot = snapshot;
+    this.syncVideoControls();
+  }
+
+  onPdfStateUpdated(snapshot: PdfPlaybackSnapshot | null): void {
+    this.currentPdfSnapshot = snapshot;
+    this.syncPdfControls();
+    if (snapshot?.ready) {
+      this.plugin.storeActivePdfTabState(snapshot);
+    }
+	void this.pdfPreviewRenderer?.syncToSnapshot(snapshot);
+  }
+
+  override async renderPayload(payload: ScreenPayload): Promise<void> {
+    this.refreshTabs();
+    this.rebuildControls(payload);
+
+    if (payload.kind === "video") {
+      this.getRenderHost().empty();
+      this.renderedPayload = payload;
+      if (this.statusEl) {
+        this.statusEl.textContent = `Selected: ${this.plugin.getPayloadTitle(payload)}`;
+      }
+      this.getRenderHost().createDiv({
+        cls: "ttrpg-tools-screen-controller__placeholder",
+        text:
+          payload.kind === "video"
+            ? "Use the controls above to manage video playback."
+            : "Use the controls above to navigate the PDF shown on the player screen.",
+      });
+      return;
+    }
+
+    await super.renderPayload(payload);
+
+    if (payload.kind === "pdf") {
+      await this.pdfPreviewRenderer?.syncToSnapshot(this.currentPdfSnapshot);
+    }
+
+    if (this.statusEl) {
+      this.statusEl.textContent = `Selected: ${this.plugin.getPayloadTitle(payload)}`;
+    }
+  }
+
+  private showEmptyState(): void {
+    if (this.statusEl) {
+      this.statusEl.textContent = "No active player screen item.";
+    }
+    if (this.controlsEl) {
+      this.controlsEl.empty();
+    }
+    this.getRenderHost().empty();
+    this.getRenderHost().createDiv({
+      cls: "ttrpg-tools-screen-controller__placeholder",
+      text: "Send something to the player screen to create a tab.",
     });
+  }
+  
+  protected override renderPdf(host: HTMLElement, _source: string): void {
+    const payload = isPdfPayload(this.renderedPayload) ? this.renderedPayload : null;
+    if (!payload) return;
 
-    const controls = this.contentEl.createDiv({
-      cls: "ttrpg-tools-screen-fog-controller__controls",
-    });
+    const wrap = host.createDiv({ cls: "ttrpg-tools-screen-media" });
+    const stage = wrap.createDiv({ cls: "ttrpg-tools-screen-media-stage ttrpg-tools-screen-stage" });
+    this.stageEl = stage;
+    this.installStageSizeSync();
 
-    this.toolBtn = controls.createEl("button", { text: "Tool: reveal" });
-    this.toolBtn.onclick = () => {
-      const next =
-        this.fogOverlay?.getBrushMode() === "cover" ? "reveal" : "cover";
-      this.fogOverlay?.setBrushMode(next);
-      this.syncFogControls();
-    };
+    this.pdfPreviewRenderer = new ScreenPdfRenderer(
+      this.app,
+      stage,
+      payload,
+      () => undefined,
+	  this.plugin.getActivePdfTabState(),
+      false,
+    );
+    void this.pdfPreviewRenderer.load().then(() => this.pdfPreviewRenderer?.syncToSnapshot(this.currentPdfSnapshot));
+  }
 
-    controls.createEl("span", { text: "Brush radius:" });
-    this.radiusInput = controls.createEl("input", {
-      attr: { type: "range", min: "5", max: "200", value: "40" },
-    });
-    setCssProps(this.radiusInput, {
-      width: "220px",
-    });
-    this.radiusInput.oninput = () => {
-      const next = Number(this.radiusInput?.value ?? "40");
-      this.fogOverlay?.setBrushRadius(next);
-      this.syncFogControls();
-    };
+  private rebuildControls(payload: ScreenPayload): void {
+    if (!this.controlsEl) return;
+    this.controlsEl.empty();
 
-    this.radiusLabel = controls.createEl("span", { text: "40px" });
+    this.playBtn = null;
+    this.restartBtn = null;
+    this.loopInput = null;
+    this.muteInput = null;
+    this.seekInput = null;
+    this.timeLabelEl = null;
+    this.volumeInput = null;
 
-    const fullFogBtn = controls.createEl("button", { text: "Reset to full fog" });
-    fullFogBtn.onclick = () => {
-      void this.fogOverlay?.fillFullFogAndPublish();
-    };
+    this.fogToolBtn = null;
+    this.fogRadiusInput = null;
+    this.fogRadiusLabel = null;
 
-    const clearBtn = controls.createEl("button", { text: "Reveal all" });
-    clearBtn.onclick = () => {
-      void this.fogOverlay?.clearFogAndPublish();
-    };
+    this.pdfPrevBtn = null;
+    this.pdfNextBtn = null;
+    this.pdfPageInput = null;
+    this.pdfPageLabel = null;
+    this.pdfZoomInput = null;
+    this.pdfZoomLabel = null;
+
+    const fog = getPayloadFog(payload);
+    if (fog) {
+      const row = this.controlsEl.createDiv({
+        cls: "ttrpg-tools-screen-controller__row",
+      });
+      this.fogToolBtn = row.createEl("button", { text: "Tool: reveal" });
+      this.fogToolBtn.onclick = () => {
+        const next =
+          this.fogOverlay?.getBrushMode() === "cover" ? "reveal" : "cover";
+        this.fogOverlay?.setBrushMode(next);
+        this.syncFogControls();
+      };
+
+      row.createSpan({ text: "Brush:" });
+      this.fogRadiusInput = row.createEl("input", {
+        attr: { type: "range", min: "5", max: "200", value: "40" },
+      });
+      this.fogRadiusInput.oninput = () => {
+        this.fogOverlay?.setBrushRadius(Number(this.fogRadiusInput?.value ?? "40"));
+        this.syncFogControls();
+      };
+      this.fogRadiusLabel = row.createEl("span", { text: "40px" });
+
+      row.createEl("button", { text: "Reset to full fog" }).onclick = () => {
+        void this.fogOverlay?.fillFullFogAndPublish();
+      };
+      row.createEl("button", { text: "Reveal all" }).onclick = () => {
+        void this.fogOverlay?.clearFogAndPublish();
+      };
+    }
+
+    if (payload.kind === "video") {
+      const controlsRow = this.controlsEl.createDiv({
+        cls: "ttrpg-tools-screen-controller__row",
+      });
+
+      this.playBtn = controlsRow.createEl("button", { text: "Play" });
+      this.playBtn.onclick = () => {
+        const paused = this.currentVideoSnapshot?.paused ?? true;
+        void this.plugin.applyVideoCommand({ type: paused ? "play" : "pause" });
+      };
+
+      this.restartBtn = controlsRow.createEl("button", { text: "Restart" });
+      this.restartBtn.onclick = () => {
+        void this.plugin.applyVideoCommand({ type: "restart" });
+      };
+
+      const loopWrap = controlsRow.createEl("label", {
+        cls: "ttrpg-tools-screen-controller__toggle",
+      });
+      this.loopInput = loopWrap.createEl("input", { attr: { type: "checkbox" } });
+      loopWrap.createSpan({ text: "Loop" });
+      this.loopInput.onchange = () => {
+        void this.plugin.applyVideoCommand({
+          type: "set-loop",
+          loop: !!this.loopInput?.checked,
+        });
+      };
+
+      const muteWrap = controlsRow.createEl("label", {
+        cls: "ttrpg-tools-screen-controller__toggle",
+      });
+      this.muteInput = muteWrap.createEl("input", { attr: { type: "checkbox" } });
+      muteWrap.createSpan({ text: "Mute" });
+      this.muteInput.onchange = () => {
+        void this.plugin.applyVideoCommand({
+          type: "set-muted",
+          muted: !!this.muteInput?.checked,
+        });
+      };
+
+      const timelineRow = this.controlsEl.createDiv({
+        cls: "ttrpg-tools-screen-controller__row",
+      });
+      this.seekInput = timelineRow.createEl("input", {
+        attr: { type: "range", min: "0", max: "0", step: "0.01", value: "0" },
+      });
+      this.timeLabelEl = timelineRow.createEl("span", { text: "0:00 / 0:00" });
+
+      this.seekInput.addEventListener("pointerdown", () => {
+        this.isScrubbing = true;
+      });
+      this.seekInput.addEventListener("pointerup", () => {
+        this.commitSeekFromUi();
+      });
+      this.seekInput.addEventListener("pointercancel", () => {
+        this.commitSeekFromUi();
+      });
+      this.seekInput.oninput = () => {
+        this.scrubPreviewTime = Number(this.seekInput?.value ?? "0");
+        this.syncVideoControls();
+      };
+      this.seekInput.onchange = () => {
+        this.commitSeekFromUi();
+      };
+
+      const volumeRow = this.controlsEl.createDiv({
+        cls: "ttrpg-tools-screen-controller__row",
+      });
+      volumeRow.createEl("span", { text: "Volume" });
+      this.volumeInput = volumeRow.createEl("input", {
+        attr: { type: "range", min: "0", max: "1", step: "0.01", value: "1" },
+      });
+      this.volumeInput.oninput = () => {
+        void this.plugin.applyVideoCommand({
+          type: "set-volume",
+          volume: Number(this.volumeInput?.value ?? "1"),
+        });
+      };
+    }
+
+    if (payload.kind === "pdf") {
+      const row = this.controlsEl.createDiv({
+        cls: "ttrpg-tools-screen-controller__row",
+      });
+      this.pdfPrevBtn = row.createEl("button", { text: "Previous page" });
+      this.pdfPrevBtn.onclick = () => {
+        void this.plugin.applyPdfCommand({ type: "prev-page" });
+      };
+      this.pdfNextBtn = row.createEl("button", { text: "Next page" });
+      this.pdfNextBtn.onclick = () => {
+        void this.plugin.applyPdfCommand({ type: "next-page" });
+      };
+
+      row.createSpan({ text: "Page" });
+      this.pdfPageInput = row.createEl("input", {
+        attr: { type: "number", min: "1", value: "1" },
+      });
+      setCssProps(this.pdfPageInput, {
+        width: "7ch",
+      });
+      this.pdfPageLabel = row.createEl("span", { text: "/ 1" });
+      this.pdfPageInput.onchange = () => {
+        void this.plugin.applyPdfCommand({
+          type: "set-page",
+          page: this.getCurrentPdfPage(),
+        });
+      };
+
+      row.createSpan({ text: "Zoom" });
+      this.pdfZoomInput = row.createEl("input", {
+        attr: { type: "range", min: "0.25", max: "3", step: "0.05", value: "1" },
+      });
+      this.pdfZoomLabel = row.createEl("span", { text: "100%" });
+      this.pdfZoomInput.oninput = () => {
+        const zoom = Number(this.pdfZoomInput?.value ?? "1");
+        if (this.pdfZoomLabel) this.pdfZoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+        void this.plugin.applyPdfCommand({ type: "set-zoom", zoom });
+      };
+    }
+
+    this.syncFogControls();
+    this.syncVideoControls();
+    this.syncPdfControls();
+  }
+
+  private commitSeekFromUi(): void {
+    const next = Number(this.seekInput?.value ?? "0");
+    this.isScrubbing = false;
+    this.scrubPreviewTime = null;
+    void this.plugin.applyVideoCommand({ type: "seek", time: next });
   }
 
   private syncFogControls(): void {
     const mode = this.fogOverlay?.getBrushMode() ?? "reveal";
     const radius = this.fogOverlay?.getBrushRadius() ?? 40;
-    if (this.toolBtn) this.toolBtn.textContent = mode === "cover" ? "Tool: Cover" : "Tool: Reveal";
-    if (this.radiusInput) this.radiusInput.value = String(radius);
-    if (this.radiusLabel) this.radiusLabel.textContent = `${radius}px`;
+    if (this.fogToolBtn) this.fogToolBtn.textContent = mode === "cover" ? "Tool: cover" : "Tool: reveal";
+    if (this.fogRadiusInput) this.fogRadiusInput.value = String(radius);
+    if (this.fogRadiusLabel) this.fogRadiusLabel.textContent = `${radius}px`;
   }
 
-  override async renderPayload(payload: ScreenPayload): Promise<void> {
-    await super.renderPayload(payload);
-    if (this.targetLabelEl) {
-      const label =
-        payload.kind === "note"
-          ? payload.path
-          : payload.kind === "image"
-            ? payload.filePath ?? payload.source
-            : payload.kind === "markdown"
-              ? payload.sourcePath
-              : payload.filePath ?? payload.source;
-      this.targetLabelEl.textContent = `Target: ${label}`;
+  private syncVideoControls(): void {
+    const snapshot = this.currentVideoSnapshot;
+    if (this.playBtn) this.playBtn.textContent = snapshot?.paused ?? true ? "Play" : "Pause";
+    if (this.loopInput) this.loopInput.checked = snapshot?.loop ?? false;
+    if (this.muteInput) this.muteInput.checked = snapshot?.muted ?? false;
+    if (this.volumeInput && snapshot) this.volumeInput.value = String(snapshot.volume);
+    if (this.seekInput) {
+      const duration = snapshot?.duration ?? 0;
+      this.seekInput.max = String(Math.max(0, duration));
+      if (!this.isScrubbing) this.seekInput.value = String(snapshot?.currentTime ?? 0);
     }
-    this.syncFogControls();
+    if (this.timeLabelEl) {
+      const current =
+        this.isScrubbing && this.scrubPreviewTime !== null
+          ? this.scrubPreviewTime
+          : (snapshot?.currentTime ?? 0);
+      this.timeLabelEl.textContent = `${formatTimecode(current)} / ${formatTimecode(snapshot?.duration ?? 0)}`;
+    }
+  }
+
+  private syncPdfControls(): void {
+    const snapshot = this.currentPdfSnapshot;
+    const pageCount = Math.max(1, snapshot?.pageCount ?? this.plugin.getActivePdfTabState()?.pageCount ?? 1);
+    const currentPage = clampPdfPage(snapshot?.currentPage ?? this.plugin.getActivePdfTabState()?.currentPage ?? 1, pageCount);
+    const zoom = snapshot?.zoom ?? this.plugin.getActivePdfTabState()?.zoom ?? 1;
+    const ready = snapshot?.ready ?? this.plugin.getActivePdfTabState()?.ready ?? false;
+
+    if (this.pdfPageInput) {
+      this.pdfPageInput.value = String(currentPage);
+      this.pdfPageInput.max = String(pageCount);
+      this.pdfPageInput.disabled = !ready;
+    }
+    if (this.pdfPageLabel) this.pdfPageLabel.textContent = `/ ${pageCount}`;
+    if (this.pdfZoomInput) this.pdfZoomInput.value = String(zoom);
+    if (this.pdfZoomLabel) this.pdfZoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+    if (this.pdfPrevBtn) this.pdfPrevBtn.disabled = !ready || currentPage <= 1;
+    if (this.pdfNextBtn) this.pdfNextBtn.disabled = !ready || currentPage >= pageCount;
+    if (this.pdfZoomInput) this.pdfZoomInput.disabled = !ready;
+  }
+}
+
+class VaultMediaSuggestModal extends FuzzySuggestModal<TFile> {
+  private plugin: TTRPGToolsScreenPlugin;
+  private items: TFile[];
+  private mode: VaultMediaPickerMode;
+
+  constructor(app: App, plugin: TTRPGToolsScreenPlugin, mode: VaultMediaPickerMode = "all") {
+    super(app);
+    this.plugin = plugin;
+    this.mode = mode;
+    this.setPlaceholder(getMediaPickerPlaceholder(mode));
+    this.items = this.app.vault
+      .getFiles()
+      .filter((file) => mediaMatchesMode(file, mode))
+      .sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  getItems(): TFile[] {
+    return this.items;
+  }
+
+  getItemText(item: TFile): string {
+    return item.path;
+  }
+  
+  renderSuggestion(match: FuzzyMatch<TFile>, el: HTMLElement): void {
+    el.empty();
+    const item = match.item;
+    const row = el.createDiv({ cls: "ttrpg-tools-screen-picker__row" });
+    row.createSpan({ text: item.basename, cls: "ttrpg-tools-screen-picker__name" });
+    row.createSpan({
+      text: item.extension.toUpperCase(),
+      cls: "ttrpg-tools-screen-picker__badge",
+    });
+
+    el.createDiv({
+      text: item.path,
+      cls: "ttrpg-tools-screen-picker__path",
+    });
+  }
+
+  onChooseItem(item: TFile): void {
+    const ext = item.extension?.toLowerCase() ?? "";
+    if (isImageExt(ext)) {
+      void this.plugin.sendImageByPath(item.path);
+      return;
+    }
+    if (isVideoExt(ext)) {
+      void this.plugin.sendVideoByPath(item.path);
+      return;
+    }
+    if (isPdfExt(ext)) {
+      void this.plugin.sendPdfByPath(item.path);
+    }
   }
 }
 
@@ -1460,16 +2570,20 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   private screenLeaf: WorkspaceLeaf | null = null;
   private currentPayload: ScreenPayload | null = null;
   private previewContextMenuRoots = new WeakSet<HTMLElement>();
+  private controllerLeaf: WorkspaceLeaf | null = null;
+  private screenItems: ScreenControllerItem[] = [];
+  private currentItemId: string | null = null;
   private boundsSaveTimer: number | null = null;
-  private fogControllerLeaf: WorkspaceLeaf | null = null;
   private fogMasks = new Map<string, string>();
   private currentScreenRenderSize: RenderBox | null = null;
+  private currentVideoSnapshot: VideoPlaybackSnapshot | null = null;
+  private currentPdfSnapshot: PdfPlaybackSnapshot | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
 
     this.registerView(SCREEN_VIEW_TYPE, (leaf) => new ScreenDisplayView(leaf, this));
-	this.registerView(SCREEN_FOG_CONTROLLER_VIEW_TYPE, (leaf) => new ScreenFogControllerView(leaf, this));
+	this.registerView(SCREEN_CONTROLLER_VIEW_TYPE, (leaf) => new ScreenControllerView(leaf, this));
 
     this.registerDomEvent(document, "contextmenu", (ev: MouseEvent) => {
       this.onGlobalContextMenu(ev);
@@ -1494,6 +2608,46 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         void this.sendActiveNote();
       },
     });
+	
+    this.addCommand({
+      id: "send-selected-text-to-screen",
+      name: "Send selected text to screen",
+      editorCallback: (editor, view) => {
+        void this.sendSelectedText(editor, view);
+      },
+    });
+
+    this.addCommand({
+      id: "open-player-screen-media-picker",
+      name: "Open player screen media picker",
+      callback: () => {
+        new VaultMediaSuggestModal(this.app, this).open();
+      }
+    });
+
+    this.addCommand({
+      id: "open-player-screen-image-picker",
+      name: "Open player screen image picker",
+      callback: () => {
+        new VaultMediaSuggestModal(this.app, this, "image").open();
+      },
+    });
+
+    this.addCommand({
+      id: "open-player-screen-video-picker",
+      name: "Open player screen video picker",
+      callback: () => {
+        new VaultMediaSuggestModal(this.app, this, "video").open();
+      },
+    });
+
+    this.addCommand({
+      id: "open-player-screen-pdf-picker",
+      name: "Open player screen PDF picker",
+      callback: () => {
+        new VaultMediaSuggestModal(this.app, this, "pdf").open();
+      },
+    });
 
     this.addCommand({
       id: "send-current-paragraph-to-screen",
@@ -1504,15 +2658,13 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     });
 	
     this.addCommand({
-      id: "open-fog-controller",
-      name: "Open fog controller",
+      id: "open-player-screen-controller",
+      name: "Open player screen controller",
       callback: () => {
-        const payload = this.getCurrentFogPayload();
-        if (!payload) return;
-        void this.openOrUpdateFogController(payload);
+        void this.openOrUpdateController();
       },
     });
-
+	
     this.addCommand({
       id: "close-screen-window",
       name: "Close screen window",
@@ -1548,8 +2700,12 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       this.boundsSaveTimer = null;
     }
 
+    if (pdfJsWorkerInitPromise) {
+      pdfJsWorkerInitPromise = null;
+    }
+
     this.closeScreenLeaf();
-	this.closeFogControllerLeaf();
+	this.closeControllerLeaf();
   }
 
   async loadSettings(): Promise<void> {
@@ -1574,20 +2730,74 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   }
 
   public clearScreen(): void {
-    this.currentPayload = {
-      kind: "markdown",
-      markdown: "",
-      sourcePath: "",
-    };
-    void this.renderCurrentPayload();
+    this.currentPayload = null;
+    this.currentItemId = null;
+    this.currentVideoSnapshot = null;
+    this.currentPdfSnapshot = null;
+    void this.renderBlankScreen();
+    void this.refreshControllerView();
   }
 
   getCurrentPayload(): ScreenPayload | null {
     return this.currentPayload;
   }
   
+  private getControllerItemById(id: string | null): ScreenControllerItem | null {
+    if (!id) return null;
+    return this.screenItems.find((item) => item.id === id) ?? null;
+  }
+
+  private getCurrentControllerItem(): ScreenControllerItem | null {
+    return this.getControllerItemById(this.currentItemId);
+  }
+  
+  getControllerItems(): ScreenControllerItem[] {
+    return this.screenItems.map((item) => ({
+      ...item,
+      pdfState: item.pdfState ? clonePdfTabState(item.pdfState) : undefined,
+    }));
+  }
+
+  getCurrentControllerItemId(): string | null {
+    return this.currentItemId;
+  }
+  
+  getActivePdfTabState(): PdfTabState | null {
+    const item = this.getCurrentControllerItem();
+    if (!item?.pdfState) return null;
+    return clonePdfTabState(item.pdfState);
+  }
+  
+  getCurrentVideoPayload(): VideoScreenPayload | null {
+    return isVideoPayload(this.currentPayload) ? this.currentPayload : null;
+  }
+
+  getCurrentVideoSnapshot(): VideoPlaybackSnapshot | null {
+    return this.currentVideoSnapshot ? { ...this.currentVideoSnapshot } : null;
+  }
+  
+  getCurrentPdfPayload(): PdfScreenPayload | null {
+    return isPdfPayload(this.currentPayload) ? this.currentPayload : null;
+  }
+
+  getCurrentPdfSnapshot(): PdfPlaybackSnapshot | null {
+    return this.currentPdfSnapshot ? { ...this.currentPdfSnapshot } : null;
+  }
+  
+  storeActivePdfTabState(snapshot: PdfPlaybackSnapshot): void {
+    const item = this.getCurrentControllerItem();
+    if (!item) return;
+    if (!isPdfPayload(item.payload)) return;
+    item.pdfState = {
+      currentPage: clampPdfPage(snapshot.currentPage, snapshot.pageCount),
+      pageCount: Math.max(1, snapshot.pageCount),
+      zoom: Math.min(3, Math.max(0.25, snapshot.zoom)),
+      ready: snapshot.ready,
+    };
+  }
+  
   getCurrentFogPayload(): ScreenPayload | null {
-    if (!this.currentPayload?.fog?.enabled) return null;
+    if (!getPayloadFog(this.currentPayload)) return null;
     return this.currentPayload;
   }
 
@@ -1595,16 +2805,16 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     if (this.screenLeaf === leaf) {
       this.screenLeaf = null;
       this.currentScreenRenderSize = null;
-      if (this.fogControllerLeaf?.view instanceof BaseRenderedScreenView) {
-        this.fogControllerLeaf.view.refreshStageSizeVars();
+	  this.currentVideoSnapshot = null;
+      if (this.controllerLeaf?.view instanceof BaseRenderedScreenView) {
+        this.controllerLeaf.view.refreshStageSizeVars();
       }
-	  this.closeFogControllerLeaf();
     }
   }
   
-  notifyFogControllerLeafClosed(leaf: WorkspaceLeaf): void {
-    if (this.fogControllerLeaf === leaf) {
-      this.fogControllerLeaf = null;
+  notifyControllerLeafClosed(leaf: WorkspaceLeaf): void {
+    if (this.controllerLeaf === leaf) {
+      this.controllerLeaf = null;
     }
   }
 
@@ -1642,9 +2852,38 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     this.currentScreenRenderSize = next;
 
-    if (this.fogControllerLeaf?.view instanceof BaseRenderedScreenView) {
-      this.fogControllerLeaf.view.refreshStageSizeVars();
+    if (this.controllerLeaf?.view instanceof BaseRenderedScreenView) {
+      this.controllerLeaf.view.refreshStageSizeVars();
     }
+  }
+  
+  async updateVideoSnapshot(snapshot: VideoPlaybackSnapshot | null): Promise<void> {
+    this.currentVideoSnapshot = snapshot ? { ...snapshot } : null;
+    await this.pushVideoSnapshotToOpenViews(this.currentVideoSnapshot);
+  }
+  
+  async updatePdfSnapshot(snapshot: PdfPlaybackSnapshot | null): Promise<void> {
+    this.currentPdfSnapshot = snapshot ? { ...snapshot } : null;
+    if (snapshot && isPdfPayload(this.currentPayload)) {
+      this.storeActivePdfTabState(snapshot);
+    }
+    await this.pushPdfSnapshotToOpenViews(this.currentPdfSnapshot);
+  }
+
+  async applyVideoCommand(command: VideoControlCommand): Promise<void> {
+    const view = this.screenLeaf?.view;
+    if (!(view instanceof ScreenDisplayView)) return;
+    if (!isVideoPayload(this.currentPayload)) return;
+
+    await view.applyVideoCommand(command);
+  }
+  
+  async applyPdfCommand(command: PdfControlCommand): Promise<void> {
+    const view = this.screenLeaf?.view;
+    if (!(view instanceof ScreenDisplayView)) return;
+    if (!isPdfPayload(this.currentPayload)) return;
+
+    await view.applyPdfCommand(command);
   }
 
   async setFogMask(
@@ -1666,14 +2905,37 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     if (this.screenLeaf?.view instanceof BaseRenderedScreenView) {
       views.push(this.screenLeaf.view);
     }
-    if (this.fogControllerLeaf?.view instanceof BaseRenderedScreenView) {
-      views.push(this.fogControllerLeaf.view);
+    if (this.controllerLeaf?.view instanceof BaseRenderedScreenView) {
+      views.push(this.controllerLeaf.view);
     }
 
     for (const view of views) {
       if (view === sourceView) continue;
       await view.onFogMaskUpdated(key, dataUrl);
     }
+  }
+  
+  private async pushVideoSnapshotToOpenViews(snapshot: VideoPlaybackSnapshot | null): Promise<void> {
+    const controllerView = this.controllerLeaf?.view;
+    if (controllerView instanceof ScreenControllerView) {
+      controllerView.onVideoStateUpdated(snapshot);
+    }
+  }
+
+  private async pushPdfSnapshotToOpenViews(snapshot: PdfPlaybackSnapshot | null): Promise<void> {
+    const controllerView = this.controllerLeaf?.view;
+    if (controllerView instanceof ScreenControllerView) {
+      controllerView.onPdfStateUpdated(snapshot);
+    }
+  }
+
+  public getPayloadTitle(payload: ScreenPayload): string {
+    if (payload.kind === "note") return payload.path.split("/").pop() ?? payload.path;
+    if (payload.kind === "markdown") {
+      const first = payload.markdown.split("\n").map((x) => x.trim()).find(Boolean);
+      return first?.replace(/^#+\s*/, "").slice(0, 40) || "Snippet";
+    }
+    return payload.filePath?.split("/").pop() ?? payload.source.split("/").pop() ?? payload.kind;
   }
   
   public applySavedWindowBounds(win: Window): void {
@@ -1733,17 +2995,90 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   private makeFogKey(kind: "note" | "image" | "markdown", id: string): string {
     return `${kind}:${id}`;
   }
+  
+  private makePayloadSignature(payload: ScreenPayload): string {
+    if (payload.kind === "note") return `note:${payload.path}`;
+    if (payload.kind === "markdown") return `markdown:${payload.sourcePath}:${payload.markdown}`;
+    if (payload.kind === "image") return `image:${payload.filePath ?? payload.source}:${payload.fog?.key ?? ""}`;
+    if (payload.kind === "video") return `video:${payload.filePath ?? payload.source}`;
+    return `pdf:${payload.filePath ?? payload.source}`;
+  }
 
-  private async sendPayload(payload: ScreenPayload): Promise<void> {
-    this.currentPayload = payload;
+  private makeControllerItemId(): string {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
 
-    if (payload.fog?.enabled) {
-      await this.openOrUpdateFogController(payload);
-    } else {
-      this.closeFogControllerLeaf();
+  private addOrActivateControllerItem(payload: ScreenPayload): ScreenControllerItem {
+    const signature = this.makePayloadSignature(payload);
+    const existing = this.screenItems.find((item) => item.signature === signature);
+    if (existing) {
+      existing.payload = payload;
+      existing.title = this.getPayloadTitle(payload);
+      this.currentItemId = existing.id;
+      return existing;
     }
 
+    const item: ScreenControllerItem = {
+      id: this.makeControllerItemId(),
+      title: this.getPayloadTitle(payload),
+      payload,
+      signature,
+      createdAt: Date.now(),
+	  pdfState: undefined,
+    };
+    this.screenItems.push(item);
+    this.currentItemId = item.id;
+    return item;
+  }
+
+  public async activateControllerItem(id: string): Promise<void> {
+    const item = this.screenItems.find((x) => x.id === id);
+    if (!item) return;
+    this.currentItemId = item.id;
+    this.currentPayload = item.payload;
+    if (item.payload.kind === "pdf") {
+      this.currentPdfSnapshot = item.pdfState
+        ? {
+            source: item.payload.source,
+            filePath: item.payload.filePath,
+            ...clonePdfTabState(item.pdfState),
+          }
+        : null;
+    } else {
+      this.currentPdfSnapshot = null;
+    }
     await this.renderCurrentPayload();
+    await this.refreshControllerView();
+  }
+
+  public async closeControllerItem(id: string): Promise<void> {
+    const idx = this.screenItems.findIndex((x) => x.id === id);
+    if (idx < 0) return;
+
+    const wasCurrent = this.currentItemId === id;
+    this.screenItems.splice(idx, 1);
+
+    if (wasCurrent) {
+      this.currentItemId = null;
+      this.currentPayload = null;
+      this.currentVideoSnapshot = null;
+      this.currentPdfSnapshot = null;
+
+      await this.pushVideoSnapshotToOpenViews(null);
+      await this.pushPdfSnapshotToOpenViews(null);
+      await this.renderBlankScreen();
+    }
+
+    await this.refreshControllerView();
+  }
+
+  private async sendPayload(payload: ScreenPayload): Promise<void> {
+    const item = this.addOrActivateControllerItem(payload);
+    this.currentPayload = item.payload;
+
+    await this.renderCurrentPayload();
+    await this.openOrUpdateController();
+    await this.refreshControllerView();
   }
 
   public async sendNoteByPath(path: string): Promise<void> {
@@ -1847,6 +3182,24 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     await this.sendPayload({ kind: "pdf", source: pathOrSource });
   }
+  
+  public async sendVideoByPath(pathOrSource: string): Promise<void> {
+    const file = this.resolveVaultFile(
+      pathOrSource,
+      this.app.workspace.getActiveFile()?.path ?? "",
+    );
+
+    if (file) {
+      await this.sendPayload({
+        kind: "video",
+        source: this.app.vault.getResourcePath(file),
+        filePath: file.path,
+      });
+      return;
+    }
+
+    await this.sendPayload({ kind: "video", source: pathOrSource });
+  }
 
   /* ------------------------------------------------------
    * Context menus
@@ -1886,6 +3239,18 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       });
       return;
     }
+	
+    if (isVideoExt(ext)) {
+      menu.addItem((item) => {
+        item
+          .setTitle("Send video to player screen")
+          .setIcon("play")
+          .onClick(() => {
+            void this.sendVideoByPath(file.path);
+          });
+      });
+      return;
+    }
 
     if (isPdfExt(ext)) {
       menu.addItem((item) => {
@@ -1902,6 +3267,18 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   private extendEditorMenu(menu: Menu, editor: Editor, view: MarkdownView): void {
     const file = view.file;
     if (!(file instanceof TFile)) return;
+    const selected = editor.getSelection();
+
+    if (selected.trim()) {
+      menu.addItem((item) => {
+        item
+          .setTitle("Send selected text to player screen")
+          .setIcon("highlighter")
+          .onClick(() => {
+            void this.sendMarkdown(this.normalizeMarkdownSnippet(selected), file.path);
+          });
+      });
+    }
 
     menu.addItem((item) => {
       item
@@ -1954,6 +3331,34 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     el.addEventListener("contextmenu", (ev) => {
       const target = ev.target;
       if (!(target instanceof Element)) return;
+
+      // Videos in reading view
+      const video = target.closest("video");
+      if (video instanceof HTMLVideoElement && el.contains(video)) {
+        const file = this.resolveVideoElementToFile(video, sourcePath);
+        const rawSrc =
+          video.currentSrc ||
+          video.getAttribute("src") ||
+          video.querySelector("source")?.getAttribute("src") ||
+          "";
+        if (!file && !rawSrc) return;
+
+        ev.preventDefault();
+        ev.stopPropagation();
+
+        const menu = new Menu();
+        menu.addItem((item) => {
+          item
+            .setTitle("Send video to player screen")
+            .setIcon("play")
+            .onClick(() => {
+              if (file) void this.sendVideoByPath(file.path);
+              else void this.sendVideoByPath(rawSrc);
+            });
+        });
+        menu.showAtMouseEvent(ev);
+        return;
+      }
 
       // Images in reading view
       const img = target.closest("img");
@@ -2037,6 +3442,15 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
               .setIcon("brush")
               .onClick(() => {
                 void this.sendImageByPathWithFog(file.path);
+              });
+          });
+        } else if (isVideoExt(ext)) {
+          menu.addItem((item) => {
+            item
+              .setTitle("Send video to player screen")
+              .setIcon("play")
+              .onClick(() => {
+                void this.sendVideoByPath(file.path);
               });
           });
         } else {
@@ -2143,6 +3557,26 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     }
     await this.sendNoteByPath(file.path);
   }
+  
+  private normalizeMarkdownSnippet(markdown: string): string {
+    return markdown.endsWith("\n") ? markdown : `${markdown}\n`;
+  }
+
+  private async sendSelectedText(editor: Editor, view: MarkdownView): Promise<void> {
+    const file = view.file;
+    if (!(file instanceof TFile)) {
+      new Notice("No note available.", 1500);
+      return;
+    }
+
+    const selected = editor.getSelection();
+    if (!selected.trim()) {
+      new Notice("No selected text.", 1500);
+      return;
+    }
+
+    await this.sendMarkdown(this.normalizeMarkdownSnippet(selected), file.path);
+  }
 
   private async sendEditorContext(editor: Editor, view: MarkdownView): Promise<void> {
     const file = view.file;
@@ -2218,6 +3652,13 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     const md = normalizeHeadingSection(lines.slice(start, endExclusive));
     await this.sendMarkdown(md, file.path);
   }
+  
+  private isControllerLeafUsable(): boolean {
+    if (!this.controllerLeaf) return false;
+    const leafAny = this.controllerLeaf as unknown as { parent?: unknown; view?: unknown };
+    if (!leafAny.parent) return false;
+    return !!leafAny.view;
+  }
 
   /* ------------------------------------------------------
    * Popout leaf rendering
@@ -2256,10 +3697,6 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       }
     };
 
-    if (!this.isScreenLeafUsable()) {
-      this.screenLeaf = null;
-    }
-
     if (!this.screenLeaf) {
       this.screenLeaf = await createLeaf();
       return this.screenLeaf;
@@ -2276,14 +3713,103 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         await this.screenLeaf.loadIfDeferred();
       }
       return this.screenLeaf;
-    } catch (e) {
-        // The popout was probably closed manually and the leaf reference is stale.
-        void e;
+    } catch {
       this.screenLeaf = null;
     }
 
     this.screenLeaf = await createLeaf();
     return this.screenLeaf;
+  }
+
+  private async ensureControllerLeaf(): Promise<WorkspaceLeaf | null> {
+    const createLeaf = async (): Promise<WorkspaceLeaf | null> => {
+      try {
+        const anchor = await this.focusMainWindowAnchorLeaf();
+        if (!anchor) {
+          new Notice("Could not find a main-window leaf for the player screen controller.", 3000);
+          return null;
+        }
+
+        let leaf =
+          this.createLeafInSameTabGroup(anchor) ??
+          this.app.workspace.getLeaf("tab");
+
+        await leaf.setViewState({
+          type: SCREEN_CONTROLLER_VIEW_TYPE,
+          active: true,
+          state: {},
+        });
+
+        if (leaf.isDeferred) {
+          await leaf.loadIfDeferred();
+        }
+
+        if (!this.isLeafInMainWindow(leaf)) {
+          try {
+            leaf.detach();
+          } catch {
+            // ignore
+          }
+          new Notice("Could not open controller in main window.", 3000);
+          return null;
+        }
+
+        await this.app.workspace.revealLeaf(leaf);
+        return leaf;
+      } catch (e) {
+        console.error(e);
+        new Notice("Could not open player screen controller.", 3000);
+        return null;
+      }
+    };
+
+    if (!this.isControllerLeafUsable() || !this.isLeafInMainWindow(this.controllerLeaf)) {
+      this.closeControllerLeaf();
+      this.controllerLeaf = null;
+    }
+
+    if (!this.controllerLeaf) {
+      this.controllerLeaf = await createLeaf();
+      return this.controllerLeaf;
+    }
+
+    try {
+      await this.app.workspace.revealLeaf(this.controllerLeaf);
+      return this.controllerLeaf;
+    } catch {
+      this.controllerLeaf = null;
+    }
+
+    this.controllerLeaf = await createLeaf();
+    return this.controllerLeaf;
+  }
+
+  private closeControllerLeaf(): void {
+    if (!this.controllerLeaf) return;
+    try {
+      this.controllerLeaf.detach();
+    } catch {
+      // ignore
+    }
+    this.controllerLeaf = null;
+  }
+
+  private async openOrUpdateController(): Promise<void> {
+    const leaf = await this.ensureControllerLeaf();
+    if (!leaf) return;
+    const view = leaf.view;
+    if (view instanceof ScreenControllerView) {
+      view.refreshTabs();
+      if (this.currentPayload) {
+        await view.setPayload(this.currentPayload);
+      } else {
+        view.clearSelection();
+      }
+      view.onVideoStateUpdated(this.getCurrentVideoSnapshot());
+      view.onPdfStateUpdated(this.getCurrentPdfSnapshot());
+      await this.app.workspace.revealLeaf(leaf);
+      return;
+    }
   }
 
   private closeScreenLeaf(): void {
@@ -2294,6 +3820,33 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         // Ignore stale leaf teardown errors.
       }
       this.screenLeaf = null;
+    }
+  }
+
+  private async renderBlankScreen(): Promise<void> {
+    const leaf = await this.ensureScreenLeaf();
+    if (!leaf) return;
+    const view = leaf.view;
+    if (!(view instanceof ScreenDisplayView)) return;
+
+    await view.renderPayload({
+      kind: "markdown",
+      markdown: "",
+      sourcePath: "",
+    });
+  }
+
+  private async refreshControllerView(): Promise<void> {
+    const view = this.controllerLeaf?.view;
+    if (view instanceof ScreenControllerView) {
+      view.refreshTabs();
+      if (this.currentPayload) {
+        await view.renderPayload(this.currentPayload);
+      } else {
+        view.clearSelection();
+      }
+      view.onVideoStateUpdated(this.getCurrentVideoSnapshot());
+      view.onPdfStateUpdated(this.getCurrentPdfSnapshot());
     }
   }
 
@@ -2399,6 +3952,29 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     const target = ev.target;
     if (!(target instanceof Element)) return;
 
+    const video = target.closest("video");
+    if (video instanceof HTMLVideoElement) {
+      const sourcePath = this.getActiveMarkdownSourcePath();
+      const file = this.resolveVideoElementToFile(video, sourcePath);
+      const rawSrc =
+        video.currentSrc ||
+        video.getAttribute("src") ||
+        video.querySelector("source")?.getAttribute("src") ||
+        "";
+      if (!file && !rawSrc) return;
+
+      const menu = new Menu();
+      menu.addItem((item) => {
+        item.setTitle("Send video to player screen").setIcon("play").onClick(() => {
+          if (file) void this.sendVideoByPath(file.path);
+          else void this.sendVideoByPath(rawSrc);
+        });
+      });
+      menu.showAtMouseEvent(ev);
+      ev.preventDefault();
+      return;
+    }
+
     const img = target.closest("img");
     if (img instanceof HTMLImageElement) {
       const rawSrc = img.currentSrc || img.getAttribute("src") || "";
@@ -2416,22 +3992,19 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
           .setTitle("Send image to player screen")
           .setIcon("image")
           .onClick(() => {
-            if (file) {
-              void this.sendImageByPath(file.path);
-            } else {
-              void this.sendImageByPath(rawSrc);
-            }
+            if (file) void this.sendImageByPath(file.path);
+            else void this.sendImageByPath(rawSrc);
           });
       });
-        menu.addItem((item) => {
-          item
-            .setTitle("Send image with fog of war to player screen")
-            .setIcon("brush")
-            .onClick(() => {
-              if (file) void this.sendImageByPathWithFog(file.path);
-              else void this.sendImageByPathWithFog(rawSrc);
-            });
-        });
+      menu.addItem((item) => {
+        item
+          .setTitle("Send image with fog of war to player screen")
+          .setIcon("brush")
+          .onClick(() => {
+            if (file) void this.sendImageByPathWithFog(file.path);
+            else void this.sendImageByPathWithFog(rawSrc);
+          });
+      });
       menu.showAtMouseEvent(ev);
       ev.preventDefault();
       return;
@@ -2514,18 +4087,24 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
               void this.sendImageByPathWithFog(file.path);
             });
         });
+      } else if (isVideoExt(ext)) {
+        menu.addItem((item) => {
+          item
+            .setTitle("Send video to player screen")
+            .setIcon("play")
+            .onClick(() => {
+              void this.sendVideoByPath(file.path);
+            });
+        });
       } else {
         return;
       }
 
       menu.showAtMouseEvent(ev);
       ev.preventDefault();
+	  return;
     }
   }
-
-  /* ------------------------------------------------------
-   * File / link resolving
-   * ------------------------------------------------------ */
 
   private resolveImageElementToFile(img: HTMLImageElement, sourcePath: string): TFile | null {
     const embed = img.closest(".internal-embed");
@@ -2540,6 +4119,23 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     return this.resolveResourcePathToFile(rawSrc);
   }
+  
+  private resolveVideoElementToFile(video: HTMLVideoElement, sourcePath: string): TFile | null {
+    const embed = video.closest(".internal-embed");
+    const embedSrc = embed?.getAttribute("src") ?? "";
+    if (embedSrc) {
+      const file = this.resolveVaultFile(embedSrc, sourcePath);
+      if (file) return file;
+    }
+
+    const rawSrc =
+      video.currentSrc ||
+      video.getAttribute("src") ||
+      video.querySelector("source")?.getAttribute("src") ||
+      "";
+    if (!rawSrc) return null;
+    return this.resolveResourcePathToFile(rawSrc);
+  }
 
   private resolveResourcePathToFile(resourcePath: string): TFile | null {
     const files = this.app.vault.getFiles();
@@ -2549,112 +4145,6 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     return null;
   }
   
-  private isFogControllerLeafUsable(): boolean {
-    if (!this.fogControllerLeaf) return false;
-
-    const leafAny = this.fogControllerLeaf as unknown as {
-      parent?: unknown;
-      view?: unknown;
-    };
-
-    if (!leafAny.parent) return false;
-    return !!leafAny.view;
-  }
-
-  private async ensureFogControllerLeaf(): Promise<WorkspaceLeaf | null> {
-    const createLeaf = async (): Promise<WorkspaceLeaf | null> => {
-      try {
-        const anchor = await this.focusMainWindowAnchorLeaf();
-        if (!anchor) {
-          new Notice("Could not find a main-window leaf for fog controller.", 3000);
-          return null;
-        }
-
-        let leaf =
-          this.createLeafInSameTabGroup(anchor) ??
-          this.app.workspace.getLeaf("tab");
-
-        await leaf.setViewState({
-          type: SCREEN_FOG_CONTROLLER_VIEW_TYPE,
-          active: true,
-          state: {},
-        });
-
-        if (leaf.isDeferred) {
-          await leaf.loadIfDeferred();
-        }
-
-        if (!this.isLeafInMainWindow(leaf)) {
-          try {
-            leaf.detach();
-          } catch {
-            // ignore
-          }
-
-          const retryAnchor = await this.focusMainWindowAnchorLeaf();
-          if (!retryAnchor) {
-            new Notice("Could not open fog controller in main window.", 3000);
-            return null;
-          }
-
-          const retryLeaf = this.createLeafInSameTabGroup(retryAnchor);
-          if (!retryLeaf) {
-            new Notice("Could not create fog controller tab in main window.", 3000);
-            return null;
-          }
-
-          await retryLeaf.setViewState({
-            type: SCREEN_FOG_CONTROLLER_VIEW_TYPE,
-            active: true,
-            state: {},
-          });
-
-          if (retryLeaf.isDeferred) {
-            await retryLeaf.loadIfDeferred();
-          }
-
-          if (!this.isLeafInMainWindow(retryLeaf)) {
-            try {
-              retryLeaf.detach();
-            } catch {
-              // ignore
-            }
-            new Notice("Fog controller was prevented from opening in the player screen window.", 3000);
-            return null;
-          }
-          leaf = retryLeaf;
-        }
-
-        await this.app.workspace.revealLeaf(leaf);
-        return leaf;
-      } catch (e) {
-        console.error(e);
-        new Notice("Could not open fog controller.", 3000);
-        return null;
-      }
-    };
-
-    if (!this.isFogControllerLeafUsable() || !this.isLeafInMainWindow(this.fogControllerLeaf)) {
-      this.closeFogControllerLeaf();
-      this.fogControllerLeaf = null;
-    }
-
-    if (!this.fogControllerLeaf) {
-      this.fogControllerLeaf = await createLeaf();
-      return this.fogControllerLeaf;
-    }
-
-    try {
-      await this.app.workspace.revealLeaf(this.fogControllerLeaf);
-      return this.fogControllerLeaf;
-    } catch {
-      this.fogControllerLeaf = null;
-    }
-
-    this.fogControllerLeaf = await createLeaf();
-    return this.fogControllerLeaf;
-  }
-
   /* ------------------------------------------------------
    * Live refresh on file changes
    * ------------------------------------------------------ */
@@ -2664,7 +4154,18 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     if (this.currentPayload.kind === "note" && file.path === this.currentPayload.path) {
       await this.renderCurrentPayload();
-	  await this.renderFogControllerForCurrentPayload();
+	  await this.refreshControllerView();
+      return;
+    }
+
+    if (
+      this.currentPayload.kind === "video" &&
+      this.currentPayload.filePath &&
+      file.path === this.currentPayload.filePath
+    ) {
+      this.currentPayload.source = this.app.vault.getResourcePath(file);
+      await this.renderCurrentPayload();
+	  await this.refreshControllerView();
       return;
     }
 
@@ -2675,7 +4176,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     ) {
       this.currentPayload.source = this.app.vault.getResourcePath(file);
       await this.renderCurrentPayload();
-	  await this.renderFogControllerForCurrentPayload();
+	  await this.refreshControllerView();
       return;
     }
 
@@ -2686,48 +4187,8 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     ) {
       this.currentPayload.source = this.app.vault.getResourcePath(file);
       await this.renderCurrentPayload();
-	  await this.renderFogControllerForCurrentPayload();
+	  await this.refreshControllerView();
     }
-  }
-
-  private async openOrUpdateFogController(payload: ScreenPayload): Promise<void> {
-    const leaf = await this.ensureFogControllerLeaf();
-    if (!leaf) return;
-
-    const view = leaf.view;
-    if (view instanceof ScreenFogControllerView) {
-      await view.setPayload(payload);
-      await this.app.workspace.revealLeaf(leaf);
-      return;
-    }
-
-    await leaf.setViewState({
-      type: SCREEN_FOG_CONTROLLER_VIEW_TYPE,
-      active: true,
-      state: { payload },
-    });
-    await this.app.workspace.revealLeaf(leaf);
-  }
-
-  private async renderFogControllerForCurrentPayload(): Promise<void> {
-    const payload = this.getCurrentFogPayload();
-    if (!payload) return;
-    if (!this.fogControllerLeaf) return;
-
-    const view = this.fogControllerLeaf.view;
-    if (view instanceof ScreenFogControllerView) {
-      await view.renderPayload(payload);
-    }
-  }
-
-  private closeFogControllerLeaf(): void {
-    if (!this.fogControllerLeaf) return;
-    try {
-      this.fogControllerLeaf.detach();
-    } catch {
-      // ignore
-    }
-    this.fogControllerLeaf = null;
   }
 }
 
