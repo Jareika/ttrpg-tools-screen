@@ -1,4 +1,3 @@
-import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { FuzzyMatch } from "obsidian";
 import {
   Component,
@@ -178,12 +177,32 @@ type PdfControlCommand =
   | { type: "set-page"; page: number }
   | { type: "set-zoom"; zoom: number };
   
-const pdfjs = pdfjsLib as unknown as PdfJsModule;
+const PDFJS_FALLBACK_VERSION = "4.10.38";
+
+let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
+let pdfJsResolvedVersion: string | null = null;
+
+async function getPdfJsModule(): Promise<PdfJsModule> {
+  if (!pdfJsModulePromise) {
+    pdfJsModulePromise = import("pdfjs-dist/legacy/build/pdf.mjs")
+      .then((mod) => {
+        const pdfjs = mod as unknown as PdfJsModule;
+        if (typeof pdfjs.version === "string" && pdfjs.version.trim()) {
+          pdfJsResolvedVersion = pdfjs.version.trim();
+        }
+        return pdfjs;
+      })
+      .catch((err: unknown) => {
+        pdfJsModulePromise = null;
+        throw err;
+      });
+  }
+  return await pdfJsModulePromise;
+}
+
 
 function getPdfJsVersion(): string {
-  return typeof pdfjs.version === "string" && pdfjs.version.trim()
-    ? pdfjs.version.trim()
-    : "4.10.38";
+  return pdfJsResolvedVersion ?? PDFJS_FALLBACK_VERSION;
 }
 
 function getPdfJsCdnBaseUrl(): string {
@@ -200,16 +219,18 @@ function getPdfJsWasmUrl(): string {
   return `${getPdfJsCdnBaseUrl()}wasm/`;
 }
 
-async function ensurePdfJsWorkerConfigured(): Promise<void> {
-  if (pdfjs.GlobalWorkerOptions.workerSrc) return;
+async function ensurePdfJsWorkerConfigured(): Promise<PdfJsModule> {
+  const pdfjs = await getPdfJsModule();
+
+  if (pdfjs.GlobalWorkerOptions.workerSrc) return pdfjs;
 
   if (!pdfJsWorkerInitPromise) {
     pdfJsWorkerInitPromise = (async () => {
       pdfjs.GlobalWorkerOptions.workerSrc = getPdfJsWorkerSrc();
     })();
   }
-
   await pdfJsWorkerInitPromise;
+  return pdfjs;
 }
 
 type ScreenPayload =
@@ -1442,8 +1463,12 @@ class ScreenPdfRenderer {
 
   async load(): Promise<void> {
     try {
-	  await ensurePdfJsWorkerConfigured();
-
+	  const pdfjs = await ensurePdfJsWorkerConfigured();
+	  
+      this.standardFontDataUrl = `${getPdfJsCdnBaseUrl()}standard_fonts/`;
+	  this.wasmUrl = getPdfJsWasmUrl();
+      this.cMapUrl = `${getPdfJsCdnBaseUrl()}cmaps/`;
+      
       let buffer: ArrayBuffer;
       if (this.payload.filePath) {
         buffer = await this.app.vault.adapter.readBinary(this.payload.filePath);
@@ -2700,9 +2725,9 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       this.boundsSaveTimer = null;
     }
 
-    if (pdfJsWorkerInitPromise) {
-      pdfJsWorkerInitPromise = null;
-    }
+    pdfJsWorkerInitPromise = null;
+    pdfJsModulePromise = null;
+    pdfJsResolvedVersion = null;
 
     this.closeScreenLeaf();
 	this.closeControllerLeaf();
