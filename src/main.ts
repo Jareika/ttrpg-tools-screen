@@ -225,9 +225,9 @@ async function ensurePdfJsWorkerConfigured(): Promise<PdfJsModule> {
   if (pdfjs.GlobalWorkerOptions.workerSrc) return pdfjs;
 
   if (!pdfJsWorkerInitPromise) {
-    pdfJsWorkerInitPromise = (async () => {
+    pdfJsWorkerInitPromise = Promise.resolve().then(() => {
       pdfjs.GlobalWorkerOptions.workerSrc = getPdfJsWorkerSrc();
-    })();
+    });
   }
   await pdfJsWorkerInitPromise;
   return pdfjs;
@@ -2940,11 +2940,12 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     }
   }
   
-  private async pushVideoSnapshotToOpenViews(snapshot: VideoPlaybackSnapshot | null): Promise<void> {
+ private pushVideoSnapshotToOpenViews(snapshot: VideoPlaybackSnapshot | null): Promise<void> {
     const controllerView = this.controllerLeaf?.view;
     if (controllerView instanceof ScreenControllerView) {
       controllerView.onVideoStateUpdated(snapshot);
     }
+	return Promise.resolve();
   }
 
   private async pushPdfSnapshotToOpenViews(snapshot: PdfPlaybackSnapshot | null): Promise<void> {
@@ -2952,6 +2953,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     if (controllerView instanceof ScreenControllerView) {
       controllerView.onPdfStateUpdated(snapshot);
     }
+	return Promise.resolve();
   }
 
   public getPayloadTitle(payload: ScreenPayload): string {
