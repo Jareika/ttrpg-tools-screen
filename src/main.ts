@@ -161,6 +161,29 @@ interface PdfJsModule {
   getDocument(params: PdfJsDocumentInit): PdfJsLoadingTask;
 }
 
+interface ImageConverterContextMenuLike {
+  createContextMenuItems?: (
+    menu: Menu,
+    img: HTMLImageElement,
+    activeFile: TFile,
+    event: MouseEvent,
+  ) => unknown;
+}
+
+interface ImageConverterPluginLike {
+  settings?: {
+    enableContextMenu?: boolean;
+  };
+  contextMenu?: ImageConverterContextMenuLike & {
+    __playerScreenPatched?: boolean;
+    __playerScreenRestore?: () => void;
+  };
+}
+
+interface PluginsManagerLike {
+  plugins?: Record<string, unknown>;
+}
+
 type VideoControlCommand =
   | { type: "play" }
   | { type: "pause" }
@@ -2603,6 +2626,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   private currentScreenRenderSize: RenderBox | null = null;
   private currentVideoSnapshot: VideoPlaybackSnapshot | null = null;
   private currentPdfSnapshot: PdfPlaybackSnapshot | null = null;
+  private imageConverterPatchRetryTimer: number | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -2715,6 +2739,28 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         void this.onVaultModify(file);
       }),
     );
+	
+    this.app.workspace.onLayoutReady(() => {
+      this.ensureImageConverterContextMenuPatched();
+
+      let attempts = 0;
+      this.imageConverterPatchRetryTimer = window.setInterval(() => {
+        attempts += 1;
+        const patched = this.ensureImageConverterContextMenuPatched();
+        if (patched || attempts >= 10) {
+          if (this.imageConverterPatchRetryTimer !== null) {
+            window.clearInterval(this.imageConverterPatchRetryTimer);
+            this.imageConverterPatchRetryTimer = null;
+          }
+        }
+      }, 1000);
+    });
+
+    this.registerEvent(
+      this.app.workspace.on("layout-change", () => {
+        this.ensureImageConverterContextMenuPatched();
+      }),
+    );
 
     this.addSettingTab(new ScreenDisplaySettingTab(this.app, this));
   }
@@ -2728,6 +2774,13 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     pdfJsWorkerInitPromise = null;
     pdfJsModulePromise = null;
     pdfJsResolvedVersion = null;
+	
+    if (this.imageConverterPatchRetryTimer !== null) {
+      window.clearInterval(this.imageConverterPatchRetryTimer);
+      this.imageConverterPatchRetryTimer = null;
+    }
+
+    this.unpatchImageConverterContextMenuIfNeeded();
 
     this.closeScreenLeaf();
 	this.closeControllerLeaf();
@@ -3908,6 +3961,100 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     const dest = this.app.metadataCache.getFirstLinkpathDest(pathOrLink, sourcePath);
     return dest instanceof TFile ? dest : null;
+  }
+  
+  private getImageConverterPlugin(): ImageConverterPluginLike | null {
+    const plugins = (this.app as unknown as { plugins?: PluginsManagerLike }).plugins;
+    const plugin = plugins?.plugins?.["image-converter"];
+    return plugin as ImageConverterPluginLike | null;
+  }
+
+  private ensureImageConverterContextMenuPatched(): boolean {
+    const imageConverter = this.getImageConverterPlugin();
+    if (!imageConverter?.settings?.enableContextMenu) return false;
+
+    const contextMenu = imageConverter.contextMenu;
+    if (!contextMenu) return false;
+    if (contextMenu.__playerScreenPatched) return true;
+    if (typeof contextMenu.createContextMenuItems !== "function") return false;
+
+    const original = contextMenu.createContextMenuItems.bind(contextMenu);
+
+    contextMenu.createContextMenuItems = (
+      menu: Menu,
+      img: HTMLImageElement,
+      activeFile: TFile,
+      event: MouseEvent,
+    ): unknown => {
+      const result = original(menu, img, activeFile, event);
+
+      try {
+        this.appendPlayerScreenItemsToImageConverterMenu(menu, img, activeFile);
+      } catch (err) {
+        console.error("Player Screen: could not extend Image Converter context menu", err);
+      }
+
+      return result;
+    };
+
+    contextMenu.__playerScreenPatched = true;
+    contextMenu.__playerScreenRestore = () => {
+      contextMenu.createContextMenuItems = original;
+      contextMenu.__playerScreenPatched = false;
+      delete contextMenu.__playerScreenRestore;
+    };
+
+    return true;
+  }
+
+  private unpatchImageConverterContextMenuIfNeeded(): void {
+    const imageConverter = this.getImageConverterPlugin();
+    const contextMenu = imageConverter?.contextMenu;
+    contextMenu?.__playerScreenRestore?.();
+  }
+
+  private appendPlayerScreenItemsToImageConverterMenu(
+    menu: Menu,
+    img: HTMLImageElement,
+    activeFile: TFile,
+  ): void {
+    const sourcePath = activeFile.path;
+    const rawSrc = img.currentSrc || img.getAttribute("src") || "";
+
+    const file =
+      this.resolveImageElementToFile(img, sourcePath) ??
+      this.resolveResourcePathToFile(rawSrc) ??
+      this.resolveVaultFile(rawSrc, sourcePath);
+
+    if (!file && !rawSrc) return;
+
+    menu.addSeparator();
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Send image to player screen")
+        .setIcon("image")
+        .onClick(() => {
+          if (file) {
+            void this.sendImageByPath(file.path);
+          } else {
+            void this.sendImageByPath(rawSrc);
+          }
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Send image with fog of war to player screen")
+        .setIcon("brush")
+        .onClick(() => {
+          if (file) {
+            void this.sendImageByPathWithFog(file.path);
+          } else {
+            void this.sendImageByPathWithFog(rawSrc);
+          }
+        });
+    });
   }
   
   private isLeafInMainWindow(leaf: WorkspaceLeaf | null): boolean {
