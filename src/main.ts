@@ -3197,7 +3197,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     );
 
     if (!(file instanceof TFile)) {
-      new Notice("Player Screen supports only images from the vault.", 2500);
+      new Notice("Player screen supports only images from the vault.", 2500);
       return;
     }
 
@@ -3215,7 +3215,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     );
 
     if (!(file instanceof TFile)) {
-      new Notice("Player Screen supports only vault images for fog of war.", 2500);
+      new Notice("Player screen supports only vault images for fog of war.", 2500);
       return;
     }
 
@@ -3238,7 +3238,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     );
 
     if (!(file instanceof TFile)) {
-      new Notice("Player Screen supports only PDFs from the vault.", 2500);
+      new Notice("Player screen supports only pdfs from the vault.", 2500);
       return;
     }
 
@@ -3256,7 +3256,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     );
 
     if (!(file instanceof TFile)) {
-      new Notice("Player Screen supports only videos from the vault.", 2500);
+      new Notice("Player screen supports only videos from the vault.", 2500);
       return;
     }
 
