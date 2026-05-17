@@ -1,22 +1,18 @@
-/* Plain screen display view */
-
-.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .view-content,
-.workspace-leaf-content[data-type="ttrpg-tools-screen-fog-controller"] .view-content, 
-.workspace-leaf-content[data-type="ttrpg-tools-screen-video-controller"] .view-content,
-.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .view-content {
-  padding: 16px !important;
-  height: 100% !important;
-  box-sizing: border-box !important;
-  background: var(--background-primary) !important;
-}
-
 .workspace-leaf-content[data-type="ttrpg-tools-screen-view"] {
   --file-line-width: 100%;
 }
 
+.view-content.ttrpg-tools-screen-view,
+.view-content.ttrpg-tools-screen-controller,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] > .view-content.ttrpg-tools-screen-view,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] > .view-content.ttrpg-tools-screen-controller {
+  padding: 16px;
+  height: 100%;
+  box-sizing: border-box;
+  background: var(--background-primary);
+}
+
 .ttrpg-tools-screen-view,
-.ttrpg-tools-screen-fog-controller, 
-.ttrpg-tools-screen-video-controller,
 .ttrpg-tools-screen-controller {
   min-height: 0;
   width: 100%;
@@ -26,19 +22,6 @@
 }
 
 .ttrpg-tools-screen-view {
-  overflow: auto;
-}
-
-.ttrpg-tools-screen-fog-controller {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.ttrpg-tools-screen-video-controller {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
   overflow: auto;
 }
 
@@ -70,24 +53,29 @@
   box-sizing: border-box;
 }
 
-.ttrpg-tools-screen-markdown--map .zm-root,
-.ttrpg-tools-screen-markdown--map .zm-viewport,
-.ttrpg-tools-screen-markdown--map .zm-marker,
-.ttrpg-tools-screen-markdown--map .zm-hud-marker {
-  pointer-events: none !important;
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown--map .zm-root,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown--map .zm-viewport,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown--map .zm-marker,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown--map .zm-hud-marker,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown--map .zm-root,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown--map .zm-viewport,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown--map .zm-marker,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown--map .zm-hud-marker {
+  pointer-events: none;
 }
 
 .ttrpg-tools-screen-media {
   display: flex;
   width: 100%;
   height: 100%;
+  min-height: 100%;
+  min-width: 0;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  min-height: 100%;
   background: var(--background-primary);
-  padding: 0 !important;
-  margin: 0 !important;
+  padding: 0;
+  margin: 0;
 }
 
 .ttrpg-tools-screen-media-stage {
@@ -102,75 +90,83 @@
   overflow: hidden;
 }
 
-.ttrpg-tools-screen-media img {
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-media img,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-media img {
   width: auto;
   height: auto;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
   display: block;
-  -webkit-filter: none !important;
-  filter: none !important;
-  mix-blend-mode: normal !important;
-  opacity: 1 !important;
-  background: transparent !important;
-  box-shadow: none !important;
+  -webkit-filter: none;
+  filter: none;
+  mix-blend-mode: normal;
+  opacity: 1;
+  background: transparent;
+  box-shadow: none;
 }
 
-.ttrpg-tools-screen-media video {
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown img,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown img,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown .internal-embed img,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown .internal-embed img {
+  -webkit-filter: none;
+  filter: none;
+  mix-blend-mode: normal;
+  opacity: 1;
+  background: transparent;
+  box-shadow: none;
+}
+
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-media video,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-media video {
   width: auto;
   height: auto;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
-  mix-blend-mode: normal !important;
-  opacity: 1 !important;
-  background: transparent !important;
-  box-shadow: none !important;
+  display: block;
+  mix-blend-mode: normal;
+  opacity: 1;
+  background: transparent;
+  box-shadow: none;
 }
 
-.ttrpg-tools-screen-media iframe {
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-media iframe,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-media iframe {
   width: 100%;
-  min-height: 100%;
   height: 100%;
+  min-height: 100%;
   border: 0;
   background: var(--background-primary);
 }
 
-.ttrpg-tools-screen-view img,
-.ttrpg-tools-screen-markdown img,
-.ttrpg-tools-screen-markdown .internal-embed img {
-  filter: none !important;
-  mix-blend-mode: normal !important;
-  opacity: 1 !important;
-  background: transparent !important;
-  box-shadow: none !important;
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown .markdown-preview-section,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown .markdown-preview-sizer,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown.markdown-preview-view,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown .markdown-preview-view,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown .markdown-rendered,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown .markdown-preview-section,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown .markdown-preview-sizer,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown.markdown-preview-view,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown .markdown-preview-view,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown .markdown-rendered {
+  max-width: 100%;
+  width: 100%;
+  margin: 0;
+  padding-left: 0;
+  padding-right: 0;
 }
 
-.ttrpg-tools-screen-markdown .markdown-preview-section,
-.ttrpg-tools-screen-markdown .markdown-preview-sizer,
-.ttrpg-tools-screen-markdown.markdown-preview-view,
-.ttrpg-tools-screen-markdown .markdown-preview-view,
-.ttrpg-tools-screen-markdown .markdown-rendered {
-  max-width: 100% !important;
-  width: 100% !important;
-  margin: 0 !important;
-  padding-left: 0 !important;
-  padding-right: 0 !important;
-}
-
-.ttrpg-tools-screen-markdown .internal-embed,
-.ttrpg-tools-screen-markdown .media-embed,
-.ttrpg-tools-screen-markdown .image-embed {
-  margin: 0 !important;
-  padding: 0 !important;
-  max-width: 100% !important;
-}
-
-.ttrpg-tools-screen-video-controller__target,
-.ttrpg-tools-screen-video-controller__status {
-  color: var(--text-muted);
-  word-break: break-word;
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown .internal-embed,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown .media-embed,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown .image-embed,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown .internal-embed,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown .media-embed,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown .image-embed {
+  margin: 0;
+  padding: 0;
+  max-width: 100%;
 }
 
 .ttrpg-tools-screen-controller__tabs {
@@ -289,31 +285,6 @@
   border-radius: 6px;
 }
 
-.ttrpg-tools-screen-video-controller__controls,
-.ttrpg-tools-screen-video-controller__timeline,
-.ttrpg-tools-screen-video-controller__volume {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.ttrpg-tools-screen-video-controller__timeline input[type="range"] {
-  flex: 1 1 320px;
-  min-width: 180px;
-}
-
-.ttrpg-tools-screen-video-controller__volume input[type="range"] {
-  width: 220px;
-  max-width: 100%;
-}
-
-.ttrpg-tools-screen-video-controller__toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
 .ttrpg-tools-screen-picker__row {
   display: flex;
   align-items: center;
@@ -344,7 +315,7 @@
 }
 
 .ttrpg-tools-screen-fog-layer--interactive {
-  pointer-events: auto !important;
+  pointer-events: auto;
   cursor: none;
 }
 
@@ -354,30 +325,11 @@
   top: 0;
   z-index: 41;
   border: 2px solid var(--text-muted);
-  border-radius: 9999px;
+  border-radius: 50%;
   pointer-events: none;
   box-sizing: border-box;
 }
 
-.ttrpg-tools-screen-fog-controller__target {
-  margin-bottom: 10px;
-  color: var(--text-muted);
-  word-break: break-word;
-}
-
-.ttrpg-tools-screen-fog-controller__controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-  flex: 0 0 auto;
-}
-
-.ttrpg-tools-screen-fog-controller__render {
-  position: relative;
-  width: 100%;
-  min-height: 0;
-  flex: 1 1 auto;
-  overflow: auto;
+.ttrpg-tools-screen-controller input[type="range"] {
+  max-width: 100%;
 }

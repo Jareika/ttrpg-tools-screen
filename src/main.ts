@@ -9,10 +9,10 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
-  requestUrl,
   TFile,
   WorkspaceLeaf,
 } from "obsidian";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import type {
   App,
   Editor,
@@ -200,60 +200,18 @@ type PdfControlCommand =
   | { type: "set-page"; page: number }
   | { type: "set-zoom"; zoom: number };
   
-const PDFJS_FALLBACK_VERSION = "4.10.38";
+const pdfjs = pdfjsLib as unknown as PdfJsModule;
 
-let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
-let pdfJsResolvedVersion: string | null = null;
+function ensurePdfJsWorkerConfigured(): void {
+  if (pdfjs.GlobalWorkerOptions.workerSrc) return;
 
-async function getPdfJsModule(): Promise<PdfJsModule> {
-  if (!pdfJsModulePromise) {
-    pdfJsModulePromise = import("pdfjs-dist/legacy/build/pdf.mjs")
-      .then((mod) => {
-        const pdfjs = mod as unknown as PdfJsModule;
-        if (typeof pdfjs.version === "string" && pdfjs.version.trim()) {
-          pdfJsResolvedVersion = pdfjs.version.trim();
-        }
-        return pdfjs;
-      })
-      .catch((err: unknown) => {
-        pdfJsModulePromise = null;
-        throw err;
-      });
-  }
-  return await pdfJsModulePromise;
-}
+  const version =
+    typeof pdfjs.version === "string" && pdfjs.version.trim()
+      ? pdfjs.version.trim()
+      : "4.10.38";
 
-
-function getPdfJsVersion(): string {
-  return pdfJsResolvedVersion ?? PDFJS_FALLBACK_VERSION;
-}
-
-function getPdfJsCdnBaseUrl(): string {
-  return `https://cdn.jsdelivr.net/npm/pdfjs-dist@${getPdfJsVersion()}/`;
-}
-
-let pdfJsWorkerInitPromise: Promise<void> | null = null;
-
-function getPdfJsWorkerSrc(): string {
-  return `${getPdfJsCdnBaseUrl()}legacy/build/pdf.worker.min.mjs`;
-}
-
-function getPdfJsWasmUrl(): string {
-  return `${getPdfJsCdnBaseUrl()}wasm/`;
-}
-
-async function ensurePdfJsWorkerConfigured(): Promise<PdfJsModule> {
-  const pdfjs = await getPdfJsModule();
-
-  if (pdfjs.GlobalWorkerOptions.workerSrc) return pdfjs;
-
-  if (!pdfJsWorkerInitPromise) {
-    pdfJsWorkerInitPromise = Promise.resolve().then(() => {
-      pdfjs.GlobalWorkerOptions.workerSrc = getPdfJsWorkerSrc();
-    });
-  }
-  await pdfJsWorkerInitPromise;
-  return pdfjs;
+  pdfjs.GlobalWorkerOptions.workerSrc =
+    `https://cdn.jsdelivr.net/npm/pdfjs-dist@${version}/legacy/build/pdf.worker.min.mjs`;
 }
 
 type ScreenPayload =
@@ -274,6 +232,53 @@ interface HeadingCacheEntry {
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
+}
+
+type DomCtor<T extends object> = new (...args: never[]) => T;
+
+function isDomInstance<T extends object>(
+  value: unknown,
+  ctorName: string,
+  fallbackCtor: DomCtor<T>,
+): value is T {
+  if (!value || typeof value !== "object") return false;
+
+  const maybe = value as {
+    instanceOf?: (ctor: DomCtor<T>) => boolean;
+    ownerDocument?: Document | null;
+  };
+
+  if (typeof maybe.instanceOf === "function") {
+    return maybe.instanceOf(fallbackCtor);
+  }
+
+  const view = maybe.ownerDocument?.defaultView;
+  const ctor =
+    (view ? (view as unknown as Record<string, unknown>)[ctorName] : null) as
+      | DomCtor<T>
+      | null;
+
+  return value instanceof (ctor ?? fallbackCtor);
+}
+
+function isElement(value: unknown): value is Element {
+  return isDomInstance(value, "Element", Element);
+}
+
+function isHTMLElement(value: unknown): value is HTMLElement {
+  return isDomInstance(value, "HTMLElement", HTMLElement);
+}
+
+function isHTMLImageElement(value: unknown): value is HTMLImageElement {
+  return isDomInstance(value, "HTMLImageElement", HTMLImageElement);
+}
+
+function isHTMLVideoElement(value: unknown): value is HTMLVideoElement {
+  return isDomInstance(value, "HTMLVideoElement", HTMLVideoElement);
+}
+
+function isHTMLAnchorElement(value: unknown): value is HTMLAnchorElement {
+  return isDomInstance(value, "HTMLAnchorElement", HTMLAnchorElement);
 }
 
 function isScreenFogState(x: unknown): x is ScreenFogState {
@@ -601,7 +606,7 @@ abstract class BaseRenderedScreenView extends ItemView {
     apply();
 
     this.stageSizeObserver = new ResizeObserver(() => apply());
-    if (host instanceof HTMLElement) this.stageSizeObserver.observe(host);
+    if (isHTMLElement(host)) this.stageSizeObserver.observe(host);
     if (this.stageEl !== host) this.stageSizeObserver.observe(this.stageEl);
   }
 
@@ -639,10 +644,10 @@ abstract class BaseRenderedScreenView extends ItemView {
       "click",
       (ev) => {
         const target = ev.target;
-        if (!(target instanceof Element)) return;
+        if (!isElement(target)) return;
 
         const link = target.closest("a.internal-link");
-        if (!(link instanceof HTMLAnchorElement)) return;
+        if (!isHTMLAnchorElement(link)) return;
 
         const raw =
           link.getAttribute("data-href") ??
@@ -778,7 +783,12 @@ class ScreenFogOverlay {
         top: "0",
         opacity: "0",
         transform: "translate(-9999px, -9999px)",
-		"z-index": this.overlayMode === "map" ? "61" : "41",
+        "z-index": this.overlayMode === "map" ? "61" : "41",
+        "pointer-events": "none",
+        "box-sizing": "border-box",
+        "border-width": "2px",
+        "border-style": "solid",
+        "border-radius": "50%",
       });
       this.updateBrushPreviewSize();
       this.updateBrushPreviewStyle();
@@ -850,7 +860,7 @@ class ScreenFogOverlay {
     ];
 
     for (const source of sources) {
-      if (!(source instanceof HTMLElement)) continue;
+      if (!isHTMLElement(source)) continue;
       const win = source.ownerDocument.defaultView ?? window;
       const bg = win.getComputedStyle(source).backgroundColor;
       if (!isTransparentCssColor(bg)) {
@@ -937,17 +947,17 @@ class ScreenFogOverlay {
     const mapRoot = this.stageEl.querySelector(".zm-root");
     const viewport = mapRoot?.querySelector(".zm-viewport");
     const world = mapRoot?.querySelector(".zm-world");
-    if (mapRoot instanceof HTMLElement && viewport instanceof HTMLElement) {
+    if (isHTMLElement(mapRoot) && isHTMLElement(viewport)) {
       return {
         target: viewport,
         host: mapRoot,
         mode: "map",
-		world: world instanceof HTMLElement ? world : undefined,
+		world: isHTMLElement(world) ? world : undefined,
       };
     }
 
     const img = this.stageEl.querySelector("img");
-    if (img instanceof HTMLImageElement) {
+    if (isHTMLImageElement(img)) {
       return {
         target: img,
         host: this.stageEl,
@@ -1169,6 +1179,7 @@ class ScreenFogOverlay {
     setCssProps(this.brushPreviewEl, {
       width: `${d}px`,
       height: `${d}px`,
+	  "border-radius": "50%",
     });
   }
 
@@ -1176,13 +1187,16 @@ class ScreenFogOverlay {
     if (!this.brushPreviewEl) return;
     setCssProps(this.brushPreviewEl, {
       "border-style": this.brushMode === "cover" ? "dashed" : "solid",
+      "border-width": "2px",
+      "border-radius": "50%",
+      "box-sizing": "border-box",
     });
   }
 
   private updateBrushPreviewPosition(ev: PointerEvent): void {
     if (!this.canvasEl || !this.brushPreviewEl) return;
     const host = this.overlayHostEl ?? this.canvasEl.parentElement;
-    if (!(host instanceof HTMLElement)) return;
+    if (!isHTMLElement(host)) return;
     const rect = host.getBoundingClientRect();
     const x = ev.clientX - rect.left;
     const y = ev.clientY - rect.top;
@@ -1293,7 +1307,11 @@ class ScreenFogOverlay {
     if (!snap) return false;
 
     if (!this.worldMaskCanvas) {
-      this.worldMaskCanvas = document.createElement("canvas");
+      const doc: Document =
+        this.overlayHostEl?.ownerDocument ??
+        this.targetEl?.ownerDocument ??
+        window.document;
+      this.worldMaskCanvas = doc.createElement("canvas");
       this.worldMaskCtx = this.worldMaskCanvas.getContext("2d");
       if (!this.worldMaskCtx) {
         this.worldMaskCanvas = null;
@@ -1447,9 +1465,6 @@ class ScreenPdfRenderer {
   private scheduledRenderId = 0;
   private hasDeliveredInitialSnapshot = false;
   private resizeRaf: number | null = null;
-  private standardFontDataUrl: string;
-  private wasmUrl: string;
-  private cMapUrl: string;
 
   private zoom = 1;
   private pageCount = 0;
@@ -1469,9 +1484,6 @@ class ScreenPdfRenderer {
     this.hostEl = hostEl;
     this.payload = payload;
     this.onSnapshot = onSnapshot;
-    this.standardFontDataUrl = `${getPdfJsCdnBaseUrl()}standard_fonts/`;
-	this.wasmUrl = getPdfJsWasmUrl();
-    this.cMapUrl = `${getPdfJsCdnBaseUrl()}cmaps/`;
 	this.emitSnapshots = emitSnapshots;
 	this.initialState = initialState ? clonePdfTabState(initialState) : null;
 
@@ -1486,33 +1498,17 @@ class ScreenPdfRenderer {
 
   async load(): Promise<void> {
     try {
-	  const pdfjs = await ensurePdfJsWorkerConfigured();
-	  
-      this.standardFontDataUrl = `${getPdfJsCdnBaseUrl()}standard_fonts/`;
-	  this.wasmUrl = getPdfJsWasmUrl();
-      this.cMapUrl = `${getPdfJsCdnBaseUrl()}cmaps/`;
-      
-      let buffer: ArrayBuffer;
-      if (this.payload.filePath) {
-        buffer = await this.app.vault.adapter.readBinary(this.payload.filePath);
-      } else {
-        const response = await requestUrl({
-          url: this.payload.source,
-          method: "GET",
-        });
-        buffer = response.arrayBuffer;
+      ensurePdfJsWorkerConfigured();
+
+      if (!this.payload.filePath) {
+        throw new Error("Player Screen only supports PDFs from the vault.");
       }
+
+      const buffer = await this.app.vault.adapter.readBinary(this.payload.filePath);
 
       const task = pdfjs.getDocument({
         data: new Uint8Array(buffer),
-        disableWorker: false,
 		disableFontFace: true,
-        standardFontDataUrl: this.standardFontDataUrl,
-        cMapUrl: this.cMapUrl,
-        cMapPacked: true,
-		wasmUrl: this.wasmUrl,
-        useWorkerFetch: true,
-        useSystemFonts: false,
 		verbosity: 0,
       });
       this.pdfDoc = await task.promise;
@@ -1674,8 +1670,7 @@ class ScreenPdfRenderer {
 class ScreenDisplayView extends BaseRenderedScreenView {
   private plugin: TTRPGToolsScreenPlugin;
   private windowTrackTimer: number | null = null;
-  private lastTrackedBounds: WindowBounds | null = null;
-  private lastTrackedWindow: Window | null = null;
+  private stopTrackingWindowBounds: (() => void) | null = null;
   private trackedVideoEl: HTMLVideoElement | null = null;
   private videoTrackAbort: AbortController | null = null;
   private trackedPdfRenderer: ScreenPdfRenderer | null = null;
@@ -2031,30 +2026,39 @@ class ScreenDisplayView extends BaseRenderedScreenView {
   private startWindowTracking(): void {
     this.stopWindowTracking();
 
-    if (this.contentEl.win === window) return;
+    const win = this.contentEl.win;
+    if (win === window) return;
 
-    this.lastTrackedWindow = this.contentEl.win;
-    this.lastTrackedBounds = this.readWindowBounds(this.contentEl.win);
-    if (this.lastTrackedBounds) {
-      this.plugin.updateSavedWindowBounds(this.lastTrackedBounds);
-    }
-
-    this.windowTrackTimer = window.setInterval(() => {
-      if (!this.lastTrackedWindow) return;
-      const next = this.readWindowBounds(this.lastTrackedWindow);
+    let lastBounds: WindowBounds | null = null;
+    const persist = () => {
+      const next = this.readWindowBounds(win);
       if (!next) return;
-      if (this.sameBounds(next, this.lastTrackedBounds)) return;
-      this.lastTrackedBounds = next;
+      if (this.sameBounds(next, lastBounds)) return;
+      lastBounds = next;
       this.plugin.updateSavedWindowBounds(next);
-    }, 500);
+    };
+
+    const onResize = () => persist();
+    const onBlur = () => persist();
+    const onBeforeUnload = () => persist();
+
+    win.addEventListener("resize", onResize);
+    win.addEventListener("blur", onBlur);
+    win.addEventListener("beforeunload", onBeforeUnload);
+
+    persist();
+
+    this.stopTrackingWindowBounds = () => {
+      win.removeEventListener("resize", onResize);
+      win.removeEventListener("blur", onBlur);
+      win.removeEventListener("beforeunload", onBeforeUnload);
+      persist();
+    };
   }
 
   private stopWindowTracking(): void {
-    if (this.windowTrackTimer !== null) {
-      window.clearInterval(this.windowTrackTimer);
-      this.windowTrackTimer = null;
-    }
-    this.lastTrackedWindow = null;
+    this.stopTrackingWindowBounds?.();
+    this.stopTrackingWindowBounds = null;
   }
 
   private persistCurrentWindowBounds(): void {
@@ -2626,7 +2630,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   private currentScreenRenderSize: RenderBox | null = null;
   private currentVideoSnapshot: VideoPlaybackSnapshot | null = null;
   private currentPdfSnapshot: PdfPlaybackSnapshot | null = null;
-  private imageConverterPatchRetryTimer: number | null = null;
+  private imageConverterPatchRetryTimeout: number | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -2634,7 +2638,8 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     this.registerView(SCREEN_VIEW_TYPE, (leaf) => new ScreenDisplayView(leaf, this));
 	this.registerView(SCREEN_CONTROLLER_VIEW_TYPE, (leaf) => new ScreenControllerView(leaf, this));
 
-    this.registerDomEvent(document, "contextmenu", (ev: MouseEvent) => {
+    const appDoc: Document = this.app.workspace.containerEl.ownerDocument;
+    this.registerDomEvent(appDoc, "contextmenu", (ev: MouseEvent) => {
       this.onGlobalContextMenu(ev);
     });
 
@@ -2743,17 +2748,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       this.ensureImageConverterContextMenuPatched();
 
-      let attempts = 0;
-      this.imageConverterPatchRetryTimer = window.setInterval(() => {
-        attempts += 1;
-        const patched = this.ensureImageConverterContextMenuPatched();
-        if (patched || attempts >= 10) {
-          if (this.imageConverterPatchRetryTimer !== null) {
-            window.clearInterval(this.imageConverterPatchRetryTimer);
-            this.imageConverterPatchRetryTimer = null;
-          }
-        }
-      }, 1000);
+      this.retryPatchImageConverter(10);
     });
 
     this.registerEvent(
@@ -2771,13 +2766,9 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       this.boundsSaveTimer = null;
     }
 
-    pdfJsWorkerInitPromise = null;
-    pdfJsModulePromise = null;
-    pdfJsResolvedVersion = null;
-	
-    if (this.imageConverterPatchRetryTimer !== null) {
-      window.clearInterval(this.imageConverterPatchRetryTimer);
-      this.imageConverterPatchRetryTimer = null;
+    if (this.imageConverterPatchRetryTimeout !== null) {
+      window.clearTimeout(this.imageConverterPatchRetryTimeout);
+      this.imageConverterPatchRetryTimeout = null;
     }
 
     this.unpatchImageConverterContextMenuIfNeeded();
@@ -3146,7 +3137,9 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
       await this.pushVideoSnapshotToOpenViews(null);
       await this.pushPdfSnapshotToOpenViews(null);
-      await this.renderBlankScreen();
+      if (this.isScreenLeafUsable()) {
+        await this.renderBlankScreen();
+      }
     }
 
     await this.refreshControllerView();
@@ -3203,18 +3196,15 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       this.app.workspace.getActiveFile()?.path ?? "",
     );
 
-    if (file) {
-      await this.sendPayload({
-        kind: "image",
-        source: this.app.vault.getResourcePath(file),
-        filePath: file.path,
-      });
+    if (!(file instanceof TFile)) {
+      new Notice("Player Screen supports only images from the vault.", 2500);
       return;
     }
 
     await this.sendPayload({
       kind: "image",
-      source: pathOrSource,
+      source: this.app.vault.getResourcePath(file),
+      filePath: file.path,
     });
   }
 
@@ -3224,25 +3214,21 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       this.app.workspace.getActiveFile()?.path ?? "",
     );
 
-    if (file) {
-      await this.sendPayload({
-        kind: "image",
-        source: this.app.vault.getResourcePath(file),
-        filePath: file.path,
-        fog: {
-          enabled: true,
-          key: this.makeFogKey("image", file.path),
-          label: file.basename,
-        },
-      });
+    if (!(file instanceof TFile)) {
+      new Notice("Player Screen supports only vault images for fog of war.", 2500);
       return;
     }
 
     await this.sendPayload({
-        kind: "image",
-        source: pathOrSource,
-        fog: { enabled: true, key: this.makeFogKey("image", pathOrSource), label: pathOrSource },
-      });
+      kind: "image",
+      source: this.app.vault.getResourcePath(file),
+      filePath: file.path,
+      fog: {
+        enabled: true,
+        key: this.makeFogKey("image", file.path),
+        label: file.basename,
+      },
+    });
   }
 
   public async sendPdfByPath(pathOrSource: string): Promise<void> {
@@ -3251,16 +3237,16 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       this.app.workspace.getActiveFile()?.path ?? "",
     );
 
-    if (file) {
-      await this.sendPayload({
-        kind: "pdf",
-        source: this.app.vault.getResourcePath(file),
-        filePath: file.path,
-      });
+    if (!(file instanceof TFile)) {
+      new Notice("Player Screen supports only PDFs from the vault.", 2500);
       return;
     }
 
-    await this.sendPayload({ kind: "pdf", source: pathOrSource });
+    await this.sendPayload({
+      kind: "pdf",
+      source: this.app.vault.getResourcePath(file),
+      filePath: file.path,
+    });
   }
   
   public async sendVideoByPath(pathOrSource: string): Promise<void> {
@@ -3269,16 +3255,16 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       this.app.workspace.getActiveFile()?.path ?? "",
     );
 
-    if (file) {
-      await this.sendPayload({
-        kind: "video",
-        source: this.app.vault.getResourcePath(file),
-        filePath: file.path,
-      });
+    if (!(file instanceof TFile)) {
+      new Notice("Player Screen supports only videos from the vault.", 2500);
       return;
     }
 
-    await this.sendPayload({ kind: "video", source: pathOrSource });
+    await this.sendPayload({
+      kind: "video",
+      source: this.app.vault.getResourcePath(file),
+      filePath: file.path,
+    });
   }
 
   /* ------------------------------------------------------
@@ -3410,18 +3396,13 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     el.addEventListener("contextmenu", (ev) => {
       const target = ev.target;
-      if (!(target instanceof Element)) return;
+      if (!isElement(target)) return;
 
       // Videos in reading view
       const video = target.closest("video");
-      if (video instanceof HTMLVideoElement && el.contains(video)) {
+      if (isHTMLVideoElement(video) && el.contains(video)) {
         const file = this.resolveVideoElementToFile(video, sourcePath);
-        const rawSrc =
-          video.currentSrc ||
-          video.getAttribute("src") ||
-          video.querySelector("source")?.getAttribute("src") ||
-          "";
-        if (!file && !rawSrc) return;
+        if (!(file instanceof TFile)) return;
 
         ev.preventDefault();
         ev.stopPropagation();
@@ -3432,8 +3413,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
             .setTitle("Send video to player screen")
             .setIcon("play")
             .onClick(() => {
-              if (file) void this.sendVideoByPath(file.path);
-              else void this.sendVideoByPath(rawSrc);
+              void this.sendVideoByPath(file.path);
             });
         });
         menu.showAtMouseEvent(ev);
@@ -3442,10 +3422,9 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
       // Images in reading view
       const img = target.closest("img");
-      if (img instanceof HTMLImageElement && el.contains(img)) {
+      if (isHTMLImageElement(img) && el.contains(img)) {
         const file = this.resolveImageElementToFile(img, sourcePath);
-        const rawSrc = img.getAttribute("src") ?? "";
-        if (!file && !rawSrc) return;
+        if (!(file instanceof TFile)) return;
 
         ev.preventDefault();
         ev.stopPropagation();
@@ -3456,8 +3435,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
             .setTitle("Send image to player screen")
             .setIcon("image")
             .onClick(() => {
-              if (file) void this.sendImageByPath(file.path);
-              else void this.sendImageByPath(rawSrc);
+              void this.sendImageByPath(file.path);
             });
         });
         menu.addItem((item) => {
@@ -3465,8 +3443,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
             .setTitle("Send image with fog of war to player screen")
             .setIcon("brush")
             .onClick(() => {
-              if (file) void this.sendImageByPathWithFog(file.path);
-              else void this.sendImageByPathWithFog(rawSrc);
+              void this.sendImageByPathWithFog(file.path);
             });
         });
         menu.showAtMouseEvent(ev);
@@ -3475,7 +3452,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
       // Internal note/image/pdf links in reading view
       const link = target.closest("a.internal-link");
-      if (link instanceof HTMLAnchorElement && el.contains(link)) {
+      if (isHTMLAnchorElement(link) && el.contains(link)) {
         const raw =
           link.getAttribute("data-href") ??
           link.getAttribute("href") ??
@@ -3545,7 +3522,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
       // Embedded PDFs in reading view
       const embed = target.closest(".internal-embed, .pdf-embed");
-      if (embed instanceof HTMLElement && el.contains(embed)) {
+      if (isHTMLElement(embed) && el.contains(embed)) {
         const src =
           embed.getAttribute("src") ??
           embed.getAttribute("data-path") ??
@@ -3572,9 +3549,9 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       // Headings in reading view: determine global index within the preview container
       if (markdownFile) {
         const headingEl = target.closest("h1, h2, h3, h4, h5, h6");
-        if (headingEl instanceof HTMLElement && el.contains(headingEl)) {
+        if (isHTMLElement(headingEl) && el.contains(headingEl)) {
           const previewRoot = headingEl.closest(".markdown-preview-view, .markdown-rendered");
-          if (!(previewRoot instanceof HTMLElement)) return;
+          if (!isHTMLElement(previewRoot)) return;
 
           const cache = this.app.metadataCache.getFileCache(markdownFile);
           const headings = (cache?.headings ?? []) as HeadingCacheEntry[];
@@ -3604,7 +3581,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
       // Paragraphs / list items / blockquotes → send text block
       const blockEl = target.closest("p, li, blockquote");
-      if (blockEl instanceof HTMLElement && el.contains(blockEl)) {
+       if (isHTMLElement(blockEl) && el.contains(blockEl)) {
         const text = (blockEl.textContent ?? "").trim();
         if (!text) return;
 
@@ -4006,6 +3983,20 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     return true;
   }
+  
+  private retryPatchImageConverter(attemptsLeft = 10): void {
+    if (this.ensureImageConverterContextMenuPatched()) return;
+    if (attemptsLeft <= 0) return;
+
+    if (this.imageConverterPatchRetryTimeout !== null) {
+      window.clearTimeout(this.imageConverterPatchRetryTimeout);
+    }
+
+    this.imageConverterPatchRetryTimeout = window.setTimeout(() => {
+      this.imageConverterPatchRetryTimeout = null;
+      this.retryPatchImageConverter(attemptsLeft - 1);
+    }, 1000);
+  }
 
   private unpatchImageConverterContextMenuIfNeeded(): void {
     const imageConverter = this.getImageConverterPlugin();
@@ -4019,14 +4010,8 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     activeFile: TFile,
   ): void {
     const sourcePath = activeFile.path;
-    const rawSrc = img.currentSrc || img.getAttribute("src") || "";
-
-    const file =
-      this.resolveImageElementToFile(img, sourcePath) ??
-      this.resolveResourcePathToFile(rawSrc) ??
-      this.resolveVaultFile(rawSrc, sourcePath);
-
-    if (!file && !rawSrc) return;
+    const file = this.resolveImageElementToFile(img, sourcePath);
+    if (!(file instanceof TFile)) return;
 
     menu.addSeparator();
 
@@ -4035,11 +4020,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         .setTitle("Send image to player screen")
         .setIcon("image")
         .onClick(() => {
-          if (file) {
-            void this.sendImageByPath(file.path);
-          } else {
-            void this.sendImageByPath(rawSrc);
-          }
+          void this.sendImageByPath(file.path);
         });
     });
 
@@ -4048,11 +4029,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         .setTitle("Send image with fog of war to player screen")
         .setIcon("brush")
         .onClick(() => {
-          if (file) {
-            void this.sendImageByPathWithFog(file.path);
-          } else {
-            void this.sendImageByPathWithFog(rawSrc);
-          }
+          void this.sendImageByPathWithFog(file.path);
         });
     });
   }
@@ -4124,24 +4101,18 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
   private onGlobalContextMenu(ev: MouseEvent): void {
     const target = ev.target;
-    if (!(target instanceof Element)) return;
+    if (!isElement(target)) return;
 
     const video = target.closest("video");
-    if (video instanceof HTMLVideoElement) {
+    if (isHTMLVideoElement(video)) {
       const sourcePath = this.getActiveMarkdownSourcePath();
       const file = this.resolveVideoElementToFile(video, sourcePath);
-      const rawSrc =
-        video.currentSrc ||
-        video.getAttribute("src") ||
-        video.querySelector("source")?.getAttribute("src") ||
-        "";
-      if (!file && !rawSrc) return;
+      if (!(file instanceof TFile)) return;
 
       const menu = new Menu();
       menu.addItem((item) => {
         item.setTitle("Send video to player screen").setIcon("play").onClick(() => {
-          if (file) void this.sendVideoByPath(file.path);
-          else void this.sendVideoByPath(rawSrc);
+          void this.sendVideoByPath(file.path);
         });
       });
       menu.showAtMouseEvent(ev);
@@ -4150,15 +4121,11 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     }
 
     const img = target.closest("img");
-    if (img instanceof HTMLImageElement) {
-      const rawSrc = img.currentSrc || img.getAttribute("src") || "";
+    if (isHTMLImageElement(img)) {
       const sourcePath = this.getActiveMarkdownSourcePath();
 
-      const file =
-        this.resolveImageElementToFile(img, sourcePath) ??
-        this.resolveResourcePathToFile(rawSrc);
-
-      if (!file && !rawSrc) return;
+      const file = this.resolveImageElementToFile(img, sourcePath);
+      if (!(file instanceof TFile)) return;
 
       const menu = new Menu();
       menu.addItem((item) => {
@@ -4166,8 +4133,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
           .setTitle("Send image to player screen")
           .setIcon("image")
           .onClick(() => {
-            if (file) void this.sendImageByPath(file.path);
-            else void this.sendImageByPath(rawSrc);
+            void this.sendImageByPath(file.path);
           });
       });
       menu.addItem((item) => {
@@ -4175,8 +4141,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
           .setTitle("Send image with fog of war to player screen")
           .setIcon("brush")
           .onClick(() => {
-            if (file) void this.sendImageByPathWithFog(file.path);
-            else void this.sendImageByPathWithFog(rawSrc);
+            void this.sendImageByPathWithFog(file.path);
           });
       });
       menu.showAtMouseEvent(ev);
@@ -4185,7 +4150,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     }
 
     const embed = target.closest(".internal-embed, .pdf-embed");
-    if (embed instanceof HTMLElement) {
+    if (isHTMLElement(embed)) {
       const sourcePath = this.getActiveMarkdownSourcePath();
       const src =
         embed.getAttribute("src") ??
@@ -4212,7 +4177,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     }
 
     const link = target.closest("a.internal-link");
-    if (link instanceof HTMLAnchorElement) {
+    if (isHTMLAnchorElement(link)) {
       const raw =
         link.getAttribute("data-href") ??
         link.getAttribute("href") ??
