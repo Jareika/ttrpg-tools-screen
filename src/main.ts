@@ -502,8 +502,19 @@ abstract class BaseRenderedScreenView extends ItemView {
     }
 
     if (payload.kind === "image") {
-      this.renderImage(host, payload.source);
+	  const fog = getPayloadFog(payload);
+      const img = this.renderImage(host, payload.source);
+
+      if (fog) {
+        setCssProps(img, { visibility: "hidden" });
+      }
+
+      await this.waitForImageReady(img);
       await this.setupFogIfNeeded(payload);
+
+      if (fog) {
+        setCssProps(img, { visibility: null });
+      }
       return;
     }
 	
@@ -540,13 +551,29 @@ abstract class BaseRenderedScreenView extends ItemView {
     await this.fogOverlay.attach();
   }
 
-  protected renderImage(host: HTMLElement, source: string): void {
+  protected renderImage(host: HTMLElement, source: string): HTMLImageElement {
     const wrap = host.createDiv({ cls: "ttrpg-tools-screen-media" });
 	const stage = wrap.createDiv({ cls: "ttrpg-tools-screen-media-stage ttrpg-tools-screen-stage" });
     const img = stage.createEl("img");
     img.src = source;
     this.stageEl = stage;
 	this.installStageSizeSync();
+    return img;
+  }
+
+  private async waitForImageReady(img: HTMLImageElement): Promise<void> {
+    if (img.complete) return;
+
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        img.removeEventListener("load", done);
+        img.removeEventListener("error", done);
+        resolve();
+      };
+
+      img.addEventListener("load", done, { once: true });
+      img.addEventListener("error", done, { once: true });
+    });
   }
   
   protected renderVideo(host: HTMLElement, source: string): void {
@@ -2891,6 +2918,16 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     return this.fogMasks.get(key) ?? null;
   }
   
+  hasFogMask(key: string): boolean {
+    return this.fogMasks.has(key);
+  }
+
+  async clearFogMask(key: string): Promise<void> {
+    const hadMask = this.fogMasks.delete(key);
+    if (!hadMask) return;
+    await this.pushFogMaskToOpenViews(key, null);
+  }
+  
   getCurrentScreenRenderSize(): RenderBox | null {
     return this.currentScreenRenderSize
       ? { ...this.currentScreenRenderSize }
@@ -3230,6 +3267,32 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       },
     });
   }
+  
+  public async sendImageByPathWithFogReset(pathOrSource: string): Promise<void> {
+    const file = this.resolveVaultFile(
+      pathOrSource,
+      this.app.workspace.getActiveFile()?.path ?? "",
+    );
+
+    if (!(file instanceof TFile)) {
+      new Notice("Player screen supports only vault images for fog of war.", 2500);
+      return;
+    }
+
+    const fogKey = this.makeFogKey("image", file.path);
+    await this.clearFogMask(fogKey);
+
+    await this.sendPayload({
+      kind: "image",
+      source: this.app.vault.getResourcePath(file),
+      filePath: file.path,
+      fog: {
+        enabled: true,
+        key: fogKey,
+        label: file.basename,
+      },
+    });
+  }
 
   public async sendPdfByPath(pathOrSource: string): Promise<void> {
     const file = this.resolveVaultFile(
@@ -3271,6 +3334,37 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
    * Context menus
    * ------------------------------------------------------ */
 
+  private addImagePlayerScreenMenuItems(menu: Menu, file: TFile): void {
+    menu.addItem((item) => {
+      item
+        .setTitle("Send image to player screen")
+        .setIcon("image")
+        .onClick(() => {
+          void this.sendImageByPath(file.path);
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Send image with fog of war to player screen")
+        .setIcon("brush")
+        .onClick(() => {
+          void this.sendImageByPathWithFog(file.path);
+        });
+    });
+
+    if (this.hasFogMask(this.makeFogKey("image", file.path))) {
+      menu.addItem((item) => {
+        item
+          .setTitle("Send image with fog of war (reset) to player screen")
+          .setIcon("rotate-ccw")
+          .onClick(() => {
+            void this.sendImageByPathWithFogReset(file.path);
+          });
+      });
+    }
+  }
+
   private extendFileMenu(menu: Menu, file: TFile): void {
     const ext = file.extension?.toLowerCase() ?? "";
 
@@ -3286,23 +3380,8 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       return;
     }
 
-    if (isImageExt(ext)) {
-      menu.addItem((item) => {
-        item
-          .setTitle("Send image to player screen")
-          .setIcon("image")
-          .onClick(() => {
-            void this.sendImageByPath(file.path);
-          });
-      });
-      menu.addItem((item) => {
-        item
-          .setTitle("Send image with fog of war to player screen")
-          .setIcon("brush")
-          .onClick(() => {
-            void this.sendImageByPathWithFog(file.path);
-          });
-      });
+	  if (isImageExt(ext)) {
+      this.addImagePlayerScreenMenuItems(menu, file);
       return;
     }
 	
@@ -3430,22 +3509,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         ev.stopPropagation();
 
         const menu = new Menu();
-        menu.addItem((item) => {
-          item
-            .setTitle("Send image to player screen")
-            .setIcon("image")
-            .onClick(() => {
-              void this.sendImageByPath(file.path);
-            });
-        });
-        menu.addItem((item) => {
-          item
-            .setTitle("Send image with fog of war to player screen")
-            .setIcon("brush")
-            .onClick(() => {
-              void this.sendImageByPathWithFog(file.path);
-            });
-        });
+		this.addImagePlayerScreenMenuItems(menu, file);
         menu.showAtMouseEvent(ev);
         return;
       }
@@ -3485,22 +3549,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
               });
           });
         } else if (isImageExt(ext)) {
-          menu.addItem((item) => {
-            item
-              .setTitle("Send image to player screen")
-              .setIcon("image")
-              .onClick(() => {
-                void this.sendImageByPath(file.path);
-              });
-          });
-          menu.addItem((item) => {
-            item
-              .setTitle("Send image with fog of war to player screen")
-              .setIcon("brush")
-              .onClick(() => {
-                void this.sendImageByPathWithFog(file.path);
-              });
-          });
+        this.addImagePlayerScreenMenuItems(menu, file);
         } else if (isVideoExt(ext)) {
           menu.addItem((item) => {
             item
@@ -4015,23 +4064,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     menu.addSeparator();
 
-    menu.addItem((item) => {
-      item
-        .setTitle("Send image to player screen")
-        .setIcon("image")
-        .onClick(() => {
-          void this.sendImageByPath(file.path);
-        });
-    });
-
-    menu.addItem((item) => {
-      item
-        .setTitle("Send image with fog of war to player screen")
-        .setIcon("brush")
-        .onClick(() => {
-          void this.sendImageByPathWithFog(file.path);
-        });
-    });
+    this.addImagePlayerScreenMenuItems(menu, file);
   }
   
   private isLeafInMainWindow(leaf: WorkspaceLeaf | null): boolean {
@@ -4128,22 +4161,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       if (!(file instanceof TFile)) return;
 
       const menu = new Menu();
-      menu.addItem((item) => {
-        item
-          .setTitle("Send image to player screen")
-          .setIcon("image")
-          .onClick(() => {
-            void this.sendImageByPath(file.path);
-          });
-      });
-      menu.addItem((item) => {
-        item
-          .setTitle("Send image with fog of war to player screen")
-          .setIcon("brush")
-          .onClick(() => {
-            void this.sendImageByPathWithFog(file.path);
-          });
-      });
+        this.addImagePlayerScreenMenuItems(menu, file);
       menu.showAtMouseEvent(ev);
       ev.preventDefault();
       return;
@@ -4210,22 +4228,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
             });
         });
       } else if (isImageExt(ext)) {
-        menu.addItem((item) => {
-          item
-            .setTitle("Send image to player screen")
-            .setIcon("image")
-            .onClick(() => {
-              void this.sendImageByPath(file.path);
-            });
-        });
-        menu.addItem((item) => {
-          item
-            .setTitle("Send image with fog of war to player screen")
-            .setIcon("brush")
-            .onClick(() => {
-              void this.sendImageByPathWithFog(file.path);
-            });
-        });
+          this.addImagePlayerScreenMenuItems(menu, file);
       } else if (isVideoExt(ext)) {
         menu.addItem((item) => {
           item
