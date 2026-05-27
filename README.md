@@ -1,4 +1,4 @@
-# TTRPG Tools: Player Screen
+# TTRPG Tools - Player Screen
 
 Player Screen is an Obsidian plugin for sending content to a separate popout window that can be shown on a second screen, TV, or projector.
 
