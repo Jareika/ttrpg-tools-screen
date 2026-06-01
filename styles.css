@@ -56,12 +56,15 @@
 .workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown--map .zm-root,
 .workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown--map .zm-viewport,
 .workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown--map .zm-marker,
-.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown--map .zm-hud-marker,
+.workspace-leaf-content[data-type="ttrpg-tools-screen-view"] .ttrpg-tools-screen-markdown--map .zm-hud-marker {
+  pointer-events: none;
+}
+
 .workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown--map .zm-root,
 .workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown--map .zm-viewport,
 .workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown--map .zm-marker,
 .workspace-leaf-content[data-type="ttrpg-tools-screen-controller"] .ttrpg-tools-screen-markdown--map .zm-hud-marker {
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .ttrpg-tools-screen-media {

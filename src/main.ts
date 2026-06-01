@@ -6,6 +6,7 @@ import {
   MarkdownRenderer,
   Menu,
   Notice,
+  normalizePath,
   Plugin,
   PluginSettingTab,
   Setting,
@@ -27,6 +28,8 @@ interface ScreenDisplaySettings {
   savedWindowY?: number;
   savedWindowWidth?: number;
   savedWindowHeight?: number;
+  fogMaskFolder?: string;
+  fogMaskFiles?: Record<string, string>;
 }
 
 const DEFAULT_SETTINGS: ScreenDisplaySettings = {
@@ -35,6 +38,8 @@ const DEFAULT_SETTINGS: ScreenDisplaySettings = {
   savedWindowY: undefined,
   savedWindowWidth: undefined,
   savedWindowHeight: undefined,
+  fogMaskFolder: "ZoomMap/PlayerScreen/Fog",
+  fogMaskFiles: {},
 };
 
 interface WindowBounds {
@@ -217,9 +222,23 @@ function ensurePdfJsWorkerConfigured(): void {
 type ScreenPayload =
   | { kind: "note"; path: string; fog?: ScreenFogState }
   | { kind: "markdown"; markdown: string; sourcePath: string; fog?: ScreenFogState }
+  | {
+      kind: "zoommap";
+      title: string;
+      screenMarkdown: string;
+      controllerMarkdown: string;
+      sourcePath: string;
+      sourceMarkersPath: string;
+      playerMarkersPath: string;
+      playerNotePath?: string;
+      mapId?: string;
+      fog?: ScreenFogState;
+    }
   | { kind: "image"; source: string; filePath?: string; fog?: ScreenFogState }
   | { kind: "video"; source: string; filePath?: string }
   | { kind: "pdf"; source: string; filePath?: string };
+  
+type ZoomMapScreenPayload = Extract<ScreenPayload, { kind: "zoommap" }>;
 
 interface HeadingCacheEntry {
   heading: string;
@@ -298,6 +317,18 @@ function isScreenPayload(x: unknown): x is ScreenPayload {
   if (x.kind === "note") return typeof x.path === "string";
   if (x.kind === "markdown") {
     return typeof x.markdown === "string" && typeof x.sourcePath === "string";
+  }
+  if (x.kind === "zoommap") {
+    return (
+      typeof x.title === "string" &&
+      typeof x.screenMarkdown === "string" &&
+      typeof x.controllerMarkdown === "string" &&
+      typeof x.sourcePath === "string" &&
+      typeof x.sourceMarkersPath === "string" &&
+      typeof x.playerMarkersPath === "string" &&
+      (!("playerNotePath" in x) || x.playerNotePath === undefined || typeof x.playerNotePath === "string") &&
+      (!("mapId" in x) || x.mapId === undefined || typeof x.mapId === "string")
+    );
   }
   if (x.kind === "image") return typeof x.source === "string";
   if (x.kind === "pdf") return typeof x.source === "string";
@@ -398,6 +429,58 @@ function setCssProps(el: HTMLElement, props: Record<string, string | null>): voi
   }
 }
 
+function sanitizeFogFileName(key: string): string {
+  const cleaned = (key ?? "")
+    .replace(/[\\/:*?"<>|#%&{}$!'@+`=]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 140);
+
+  return cleaned || `fog-${Date.now().toString(36)}`;
+}
+
+function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer | null {
+  const idx = dataUrl.indexOf(",");
+  if (idx < 0) return null;
+
+  const meta = dataUrl.slice(0, idx).toLowerCase();
+  const payload = dataUrl.slice(idx + 1);
+
+  try {
+    const binary = meta.includes(";base64")
+      ? globalThis.atob(payload)
+      : decodeURIComponent(payload);
+
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+
+    return bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function arrayBufferToDataUrl(mime: string, buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+
+    for (let j = 0; j < chunk.length; j += 1) {
+      binary += String.fromCharCode(chunk[j]);
+    }
+  }
+
+  return `data:${mime};base64,${globalThis.btoa(binary)}`;
+}
+
 function clampPdfPage(page: number, pageCount: number): number {
   const safeCount = Math.max(1, Math.round(pageCount));
   if (!Number.isFinite(page)) return 1;
@@ -417,6 +500,10 @@ abstract class BaseRenderedScreenView extends ItemView {
   private stageSizeObserver: ResizeObserver | null = null;
   
   protected onRenderReset(): void {}
+  
+  protected getZoomMapMarkdown(payload: ZoomMapScreenPayload): string {
+    return payload.screenMarkdown;
+  }
 
   constructor(leaf: WorkspaceLeaf, plugin: TTRPGToolsScreenPlugin) {
     super(leaf);
@@ -497,6 +584,12 @@ abstract class BaseRenderedScreenView extends ItemView {
 
     if (payload.kind === "markdown") {
       await this.renderMarkdown(host, payload.markdown, payload.sourcePath);
+      await this.setupFogIfNeeded(payload);
+      return;
+    }
+	
+    if (payload.kind === "zoommap") {
+      await this.renderMarkdown(host, this.getZoomMapMarkdown(payload), payload.sourcePath);
       await this.setupFogIfNeeded(payload);
       return;
     }
@@ -730,6 +823,7 @@ class ScreenFogOverlay {
   private brushRadius = 40;
   private brushMode: "reveal" | "cover" = "reveal";
   private activeTool: "reveal" | "cover" = "reveal";
+  private inputEnabled: boolean;
   private isDrawing = false;
 
   constructor(
@@ -744,6 +838,7 @@ class ScreenFogOverlay {
     this.stageEl = stageEl;
     this.fog = fog;
     this.interactive = interactive;
+	this.inputEnabled = interactive;
   }
 
   supportsKey(key: string): boolean {
@@ -768,9 +863,106 @@ class ScreenFogOverlay {
     this.brushMode = mode;
     this.updateBrushPreviewStyle();
   }
+  
+  isInputEnabled(): boolean {
+    return this.inputEnabled;
+  }
+
+  setInputEnabled(enabled: boolean): void {
+    if (!this.interactive) {
+      this.inputEnabled = false;
+    } else {
+      this.inputEnabled = enabled;
+    }
+    this.applyInputEnabledStyle();
+    if (!this.inputEnabled) this.showBrushPreview(false);
+  }
+
+  private applyInputEnabledStyle(): void {
+    if (!this.canvasEl) return;
+    setCssProps(this.canvasEl, {
+      "pointer-events": this.interactive && this.inputEnabled ? "auto" : "none",
+      cursor: this.interactive && this.inputEnabled ? "none" : null,
+    });
+  }
+  
+  private findMapTarget():
+    | { target: HTMLElement; host: HTMLElement; mode: "map" | "media"; world?: HTMLElement }
+    | null {
+    const mapRoot = this.stageEl.querySelector(".zm-root");
+    const viewport = mapRoot?.querySelector(".zm-viewport");
+    const world = mapRoot?.querySelector(".zm-world");
+
+    if (isHTMLElement(mapRoot) && isHTMLElement(viewport)) {
+      return {
+        target: viewport,
+        host: mapRoot,
+        mode: "map",
+        world: isHTMLElement(world) ? world : undefined,
+      };
+    }
+
+    return null;
+  }
+  
+  private isMapTargetReady(
+    found: { target: HTMLElement; host: HTMLElement; mode: "map" | "media"; world?: HTMLElement },
+  ): boolean {
+    const targetRect = found.target.getBoundingClientRect();
+    if (targetRect.width < 2 || targetRect.height < 2) return false;
+
+    if (found.mode !== "map") return true;
+    if (!found.world) return false;
+
+    const styleW = Number.parseFloat(found.world.style.width ?? "");
+    const styleH = Number.parseFloat(found.world.style.height ?? "");
+
+    if (Number.isFinite(styleW) && Number.isFinite(styleH) && styleW > 2 && styleH > 2) {
+      return true;
+    }
+
+    const worldRect = found.world.getBoundingClientRect();
+    return worldRect.width > 2 && worldRect.height > 2;
+  }
+
+  private async waitForMapTarget(
+    timeoutMs = 2500,
+  ): Promise<
+    | { target: HTMLElement; host: HTMLElement; mode: "map" | "media"; world?: HTMLElement }
+    | null
+  > {
+    const immediate = this.findMapTarget();
+    if (immediate && this.isMapTargetReady(immediate)) return immediate;
+
+    const started = Date.now();
+    let lastFound: { target: HTMLElement; host: HTMLElement; mode: "map" | "media"; world?: HTMLElement } | null =
+      immediate;
+
+    while (Date.now() - started < timeoutMs) {
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve());
+      });
+
+      const found = this.findMapTarget();
+      if (found) {
+        lastFound = found;
+        if (this.isMapTargetReady(found)) return found;
+      }
+    }
+
+    return lastFound;
+  }
 
   async attach(): Promise<void> {
-    const found = this.findTarget();
+    const wantsMapTarget =
+      this.stageEl.classList.contains("ttrpg-tools-screen-markdown--map") ||
+      !!this.stageEl.querySelector(".zm-root");
+
+    const found =
+      wantsMapTarget
+        ? (await this.waitForMapTarget()) ?? this.findTarget()
+        : this.findTarget();
+
     if (!found) return;
     this.targetEl = found.target;
     this.overlayHostEl = found.host;
@@ -792,9 +984,9 @@ class ScreenFogOverlay {
       position: "absolute",
       "touch-action": "none",
       opacity: this.interactive ? "0.45" : "1",
-      "pointer-events": this.interactive ? "auto" : "none",
 	  "z-index": this.overlayMode === "map" ? "20" : "40",
     });
+	this.applyInputEnabledStyle();
 
     const ctx = this.canvasEl.getContext("2d");
     if (!ctx) return;
@@ -819,6 +1011,7 @@ class ScreenFogOverlay {
       });
       this.updateBrushPreviewSize();
       this.updateBrushPreviewStyle();
+	  this.applyInputEnabledStyle();
       this.installInteractions();
     }
 
@@ -836,7 +1029,7 @@ class ScreenFogOverlay {
 
     await this.relayout();
 
-    const existing = this.plugin.getFogMask(this.fog.key);
+    const existing = await this.plugin.getFogMaskAsync(this.fog.key);
     await this.applyMaskFromDataUrl(existing);
   }
 
@@ -1063,7 +1256,7 @@ class ScreenFogOverlay {
       return;
     }
 
-    const dataUrl = this.plugin.getFogMask(this.fog.key);
+    const dataUrl = await this.plugin.getFogMaskAsync(this.fog.key);
     if (dataUrl) {
       await this.applyMaskFromDataUrl(dataUrl);
     } else {
@@ -1093,6 +1286,7 @@ class ScreenFogOverlay {
     });
 
     this.canvasEl.addEventListener("pointerenter", () => {
+	  if (!this.inputEnabled) return;
       this.showBrushPreview(true);
     });
     this.canvasEl.addEventListener("pointerleave", () => {
@@ -1100,6 +1294,7 @@ class ScreenFogOverlay {
     });
 
     this.canvasEl.addEventListener("pointermove", (ev) => {
+	  if (!this.inputEnabled) return;
       this.showBrushPreview(true);
       this.updateBrushPreviewPosition(ev);
       if (!this.isDrawing) return;
@@ -1107,6 +1302,7 @@ class ScreenFogOverlay {
     });
 
     this.canvasEl.addEventListener("pointerdown", (ev) => {
+	  if (!this.inputEnabled) return;
       if (ev.button !== 0 && ev.button !== 2) return;
       ev.preventDefault();
       ev.stopPropagation();
@@ -1270,13 +1466,19 @@ class ScreenFogOverlay {
       }
 
       if (!this.worldMaskInitialized) {
-        const existing = this.plugin.getFogMask(this.fog.key);
-        if (existing) {
-          void this.applyMaskFromDataUrl(existing);
-          return;
-        }
-        this.fillFullFogWorld();
-        this.worldMaskInitialized = true;
+        void (async () => {
+          const existing = await this.plugin.getFogMaskAsync(this.fog.key);
+          if (existing) {
+            await this.applyMaskFromDataUrl(existing);
+            return;
+          }
+
+          this.fillFullFogWorld();
+          this.worldMaskInitialized = true;
+          this.renderWorldMaskToViewport();
+        })();
+
+        return;
       }
 
       this.renderWorldMaskToViewport();
@@ -2145,6 +2347,10 @@ class ScreenControllerView extends BaseRenderedScreenView {
   constructor(leaf: WorkspaceLeaf, plugin: TTRPGToolsScreenPlugin) {
     super(leaf, plugin);
   }
+  
+  protected override getZoomMapMarkdown(payload: ZoomMapScreenPayload): string {
+    return payload.controllerMarkdown;
+  }
 
   getViewType(): string {
     return SCREEN_CONTROLLER_VIEW_TYPE;
@@ -2308,6 +2514,11 @@ class ScreenControllerView extends BaseRenderedScreenView {
     }
 
     await super.renderPayload(payload);
+	
+    if (payload.kind === "zoommap") {
+      this.fogOverlay?.setInputEnabled(false);
+      this.syncFogControls();
+    }
 
     if (payload.kind === "pdf") {
       await this.pdfPreviewRenderer?.syncToSnapshot(this.currentPdfSnapshot);
@@ -2382,9 +2593,18 @@ class ScreenControllerView extends BaseRenderedScreenView {
       });
       this.fogToolBtn = row.createEl("button", { text: "Tool: reveal" });
       this.fogToolBtn.onclick = () => {
-        const next =
-          this.fogOverlay?.getBrushMode() === "cover" ? "reveal" : "cover";
-        this.fogOverlay?.setBrushMode(next);
+        const enabled = this.fogOverlay?.isInputEnabled() ?? false;
+        const mode = this.fogOverlay?.getBrushMode() ?? "reveal";
+
+        if (!enabled) {
+          this.fogOverlay?.setInputEnabled(true);
+          this.fogOverlay?.setBrushMode("reveal");
+        } else if (mode === "reveal") {
+          this.fogOverlay?.setBrushMode("cover");
+        } else {
+          this.fogOverlay?.setInputEnabled(false);
+        }
+
         this.syncFogControls();
       };
 
@@ -2539,9 +2759,16 @@ class ScreenControllerView extends BaseRenderedScreenView {
   }
 
   private syncFogControls(): void {
+	const enabled = this.fogOverlay?.isInputEnabled() ?? false;
     const mode = this.fogOverlay?.getBrushMode() ?? "reveal";
     const radius = this.fogOverlay?.getBrushRadius() ?? 40;
-    if (this.fogToolBtn) this.fogToolBtn.textContent = mode === "cover" ? "Tool: cover" : "Tool: reveal";
+    if (this.fogToolBtn) {
+      this.fogToolBtn.textContent = !enabled
+        ? "Tool: map"
+        : mode === "cover"
+          ? "Tool: cover"
+          : "Tool: reveal";
+    }
     if (this.fogRadiusInput) this.fogRadiusInput.value = String(radius);
     if (this.fogRadiusLabel) this.fogRadiusLabel.textContent = `${radius}px`;
   }
@@ -2811,6 +3038,8 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       ...DEFAULT_SETTINGS,
       ...saved,
     };
+    this.settings.fogMaskFolder ??= "ZoomMap/PlayerScreen/Fog";
+    this.settings.fogMaskFiles ??= {};
   }
 
   async saveSettings(): Promise<void> {
@@ -2818,7 +3047,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   }
 
   public async openScreenWindow(): Promise<void> {
-    await this.ensureScreenLeaf();
+    await this.ensureScreenLeaf(true);
   }
 
   public closeScreenWindow(): void {
@@ -2918,13 +3147,104 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     return this.fogMasks.get(key) ?? null;
   }
   
+  async getFogMaskAsync(key: string): Promise<string | null> {
+    const cached = this.fogMasks.get(key);
+    if (cached) return cached;
+
+    const storedPath = this.settings.fogMaskFiles?.[key];
+    if (!storedPath) return null;
+
+    try {
+      const path = normalizePath(storedPath);
+      const af = this.app.vault.getAbstractFileByPath(path);
+      if (!(af instanceof TFile)) return null;
+
+      const buffer = await this.app.vault.adapter.readBinary(af.path);
+      const dataUrl = arrayBufferToDataUrl("image/png", buffer);
+      this.fogMasks.set(key, dataUrl);
+      return dataUrl;
+    } catch (err) {
+      console.warn("Player Screen: could not load persistent fog mask", {
+        key,
+        storedPath,
+        err,
+      });
+      return null;
+    }
+  }
+
+  private getFogMaskFolder(): string {
+    return normalizePath(
+      (this.settings.fogMaskFolder ?? "ZoomMap/PlayerScreen/Fog").trim() ||
+        "ZoomMap/PlayerScreen/Fog",
+    );
+  }
+
+  private getFogMaskPathForKey(key: string): string {
+    const existing = this.settings.fogMaskFiles?.[key];
+    if (existing) return normalizePath(existing);
+
+    return normalizePath(
+      `${this.getFogMaskFolder()}/${sanitizeFogFileName(key)}.png`,
+    );
+  }
+
+  private async ensureVaultFolder(path: string): Promise<void> {
+    const normalized = normalizePath(path);
+    const parts = normalized.split("/").filter(Boolean);
+    let current = "";
+
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      if (this.app.vault.getAbstractFileByPath(current)) continue;
+      await this.app.vault.createFolder(current);
+    }
+  }
+
+  private async persistFogMaskToVault(key: string, dataUrl: string): Promise<void> {
+    const buffer = dataUrlToArrayBuffer(dataUrl);
+    if (!buffer) return;
+
+    const folder = this.getFogMaskFolder();
+    await this.ensureVaultFolder(folder);
+
+    const path = this.getFogMaskPathForKey(key);
+    await this.app.vault.adapter.writeBinary(path, buffer);
+
+    this.settings.fogMaskFiles ??= {};
+    if (this.settings.fogMaskFiles[key] !== path) {
+      this.settings.fogMaskFiles[key] = path;
+      await this.saveSettings();
+    }
+  }
+  
   hasFogMask(key: string): boolean {
-    return this.fogMasks.has(key);
+    return this.fogMasks.has(key) || !!this.settings.fogMaskFiles?.[key];
   }
 
   async clearFogMask(key: string): Promise<void> {
     const hadMask = this.fogMasks.delete(key);
-    if (!hadMask) return;
+    const storedPath = this.settings.fogMaskFiles?.[key];
+
+    if (storedPath) {
+      delete this.settings.fogMaskFiles![key];
+      await this.saveSettings();
+
+      const af = this.app.vault.getAbstractFileByPath(normalizePath(storedPath));
+      if (af instanceof TFile) {
+        try {
+          await this.app.fileManager.trashFile(af, true);
+        } catch (err) {
+          console.warn("Player Screen: could not trash fog mask file", {
+            key,
+            storedPath,
+            err,
+          });
+        }
+      }
+    }
+
+    if (!hadMask && !storedPath) return;
     await this.pushFogMaskToOpenViews(key, null);
   }
   
@@ -2998,6 +3318,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     sourceView?: BaseRenderedScreenView,
   ): Promise<void> {
     this.fogMasks.set(key, dataUrl);
+	await this.persistFogMaskToVault(key, dataUrl);
     await this.pushFogMaskToOpenViews(key, dataUrl, sourceView);
   }
 
@@ -3039,6 +3360,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
   public getPayloadTitle(payload: ScreenPayload): string {
     if (payload.kind === "note") return payload.path.split("/").pop() ?? payload.path;
+	if (payload.kind === "zoommap") return payload.title;
     if (payload.kind === "markdown") {
       const first = payload.markdown.split("\n").map((x) => x.trim()).find(Boolean);
       return first?.replace(/^#+\s*/, "").slice(0, 40) || "Snippet";
@@ -3107,6 +3429,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   private makePayloadSignature(payload: ScreenPayload): string {
     if (payload.kind === "note") return `note:${payload.path}`;
     if (payload.kind === "markdown") return `markdown:${payload.sourcePath}:${payload.markdown}`;
+	if (payload.kind === "zoommap") return `zoommap:${payload.playerMarkersPath}:${payload.mapId ?? ""}`;
     if (payload.kind === "image") return `image:${payload.filePath ?? payload.source}:${payload.fog?.key ?? ""}`;
     if (payload.kind === "video") return `video:${payload.filePath ?? payload.source}`;
     return `pdf:${payload.filePath ?? payload.source}`;
@@ -3186,9 +3509,13 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     const item = this.addOrActivateControllerItem(payload);
     this.currentPayload = item.payload;
 
-    await this.renderCurrentPayload();
     await this.openOrUpdateController();
-    await this.refreshControllerView();
+    await this.renderCurrentPayload();
+
+    const controllerView = this.controllerLeaf?.view;
+    if (controllerView instanceof ScreenControllerView) {
+      controllerView.refreshTabs();
+    }
   }
 
   public async sendNoteByPath(path: string): Promise<void> {
@@ -3224,6 +3551,39 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
         key,
         label: sourcePath || "Markdown",
       },
+    });
+  }
+  
+  public async sendZoomMap(payload: {
+    title: string;
+    screenMarkdown: string;
+    controllerMarkdown: string;
+    sourcePath: string;
+    sourceMarkersPath: string;
+    playerMarkersPath: string;
+    playerNotePath?: string;
+    mapId?: string;
+    fogKey?: string;
+  }): Promise<void> {
+    const fogKey = payload.fogKey?.trim();
+
+    await this.sendPayload({
+      kind: "zoommap",
+      title: payload.title,
+      screenMarkdown: payload.screenMarkdown,
+      controllerMarkdown: payload.controllerMarkdown,
+      sourcePath: payload.sourcePath,
+      sourceMarkersPath: payload.sourceMarkersPath,
+      playerMarkersPath: payload.playerMarkersPath,
+      playerNotePath: payload.playerNotePath,
+      mapId: payload.mapId,
+      fog: fogKey
+        ? {
+            enabled: true,
+            key: fogKey,
+            label: payload.title,
+          }
+        : undefined,
     });
   }
 
@@ -3782,8 +4142,8 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     return !!leafAny.view;
   }
 
-  private async ensureScreenLeaf(): Promise<WorkspaceLeaf | null> {
-    const createLeaf = async (): Promise<WorkspaceLeaf | null> => {
+  private async ensureScreenLeaf(reveal = true): Promise<WorkspaceLeaf | null> {
+    const createLeaf = async (revealAfterCreate: boolean): Promise<WorkspaceLeaf | null> => {
       try {
         const leaf = this.app.workspace.openPopoutLeaf();
         await leaf.setViewState({
@@ -3791,7 +4151,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
           active: true,
           state: {},
         });
-        await this.app.workspace.revealLeaf(leaf);
+        if (revealAfterCreate) await this.app.workspace.revealLeaf(leaf);
         if (leaf.isDeferred) {
           await leaf.loadIfDeferred();
         }
@@ -3804,26 +4164,30 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     };
 
     if (!this.screenLeaf) {
-      this.screenLeaf = await createLeaf();
+     this.screenLeaf = await createLeaf(reveal);
       return this.screenLeaf;
     }
 
     try {
-      await this.screenLeaf.setViewState({
-        type: SCREEN_VIEW_TYPE,
-        active: true,
-        state: {},
-      });
-      await this.app.workspace.revealLeaf(this.screenLeaf);
+      if (reveal) {
+        await this.screenLeaf.setViewState({
+          type: SCREEN_VIEW_TYPE,
+          active: true,
+          state: {},
+        });
+        await this.app.workspace.revealLeaf(this.screenLeaf);
+      }
+
       if (this.screenLeaf.isDeferred) {
         await this.screenLeaf.loadIfDeferred();
       }
+
       return this.screenLeaf;
     } catch {
       this.screenLeaf = null;
     }
 
-    this.screenLeaf = await createLeaf();
+    this.screenLeaf = await createLeaf(reveal);
     return this.screenLeaf;
   }
 
@@ -3930,7 +4294,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   }
 
   private async renderBlankScreen(): Promise<void> {
-    const leaf = await this.ensureScreenLeaf();
+    const leaf = await this.ensureScreenLeaf(false);
     if (!leaf) return;
     const view = leaf.view;
     if (!(view instanceof ScreenDisplayView)) return;
@@ -3964,7 +4328,8 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       return;
     }
 
-    const leaf = await this.ensureScreenLeaf();
+    const shouldReveal = !this.isScreenLeafUsable();
+    const leaf = await this.ensureScreenLeaf(shouldReveal);
     if (!leaf) return;
 
     const view = leaf.view;
@@ -3973,8 +4338,11 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       return;
     }
 
-    await view.setPayload(this.currentPayload);
-    await this.app.workspace.revealLeaf(leaf);
+    await view.renderPayload(this.currentPayload);
+
+    if (shouldReveal) {
+      await this.app.workspace.revealLeaf(leaf);
+    }
   }
 
   private getActiveMarkdownSourcePath(): string {
@@ -4366,6 +4734,31 @@ class ScreenDisplaySettingTab extends PluginSettingTab {
         tg.setValue(this.plugin.settings.autoOpenOnSend).onChange(async (v) => {
           this.plugin.settings.autoOpenOnSend = v;
           await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Persistent fog mask folder")
+      .setDesc("Vault folder where persistent fog-of-war masks are stored as PNG files.")
+      .addText((t) => {
+        t.setPlaceholder("Zoommap/playerscreen/fog");
+        t.setValue(this.plugin.settings.fogMaskFolder ?? "ZoomMap/PlayerScreen/Fog");
+        t.onChange(async (v) => {
+          this.plugin.settings.fogMaskFolder = normalizePath(
+            v.trim() || "ZoomMap/PlayerScreen/Fog",
+          );
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Clear saved fog mask index")
+      .setDesc("Clears the saved fog-mask index from plugin settings. Existing PNG files are not deleted.")
+      .addButton((b) => {
+        b.setButtonText("Clear index").onClick(async () => {
+          this.plugin.settings.fogMaskFiles = {};
+          await this.plugin.saveSettings();
+          new Notice("Saved fog-mask index cleared.", 2000);
         });
       });
 
