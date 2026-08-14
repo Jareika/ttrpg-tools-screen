@@ -26,6 +26,6 @@
     "pdfjs-dist": "^5.5.207"
   },
   "allowScripts": {
-    "esbuild@0.28.0": true
+    "esbuild": true
   }
 }
