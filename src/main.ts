@@ -19,6 +19,7 @@ import type {
   Editor,
   MarkdownPostProcessorContext,
   MarkdownView,
+  SettingDefinitionItem,
   ViewStateResult,
 } from "obsidian";
 
@@ -187,6 +188,25 @@ interface ImageConverterPluginLike {
 
 interface PluginsManagerLike {
   plugins?: Record<string, unknown>;
+}
+
+interface ControlsProviderActionLike {
+  id: string;
+  name: string;
+  icon: string;
+  group: string;
+  description?: string;
+  available: boolean;
+  active?: boolean;
+}
+
+interface ControlsProviderApiLike {
+  apiVersion: 1;
+  providerId: string;
+  providerName: string;
+  getActions(): ControlsProviderActionLike[];
+  executeAction(actionId: string): Promise<void>;
+  onActionsChanged?(callback: () => void): () => void;
 }
 
 type VideoControlCommand =
@@ -448,7 +468,7 @@ function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer | null {
 
   try {
     const binary = meta.includes(";base64")
-      ? globalThis.atob(payload)
+      ? window.atob(payload)
       : decodeURIComponent(payload);
 
     const bytes = new Uint8Array(binary.length);
@@ -478,7 +498,7 @@ function arrayBufferToDataUrl(mime: string, buffer: ArrayBuffer): string {
     }
   }
 
-  return `data:${mime};base64,${globalThis.btoa(binary)}`;
+  return `data:${mime};base64,${window.btoa(binary)}`;
 }
 
 function clampPdfPage(page: number, pageCount: number): number {
@@ -571,7 +591,7 @@ abstract class BaseRenderedScreenView extends ItemView {
     if (payload.kind === "note") {
       const file = this.app.vault.getAbstractFileByPath(payload.path);
       if (!(file instanceof TFile)) {
-        host.createEl("div", { text: `Note not found: ${payload.path}` });
+        host.createDiv({ text: `Note not found: ${payload.path}` });
         return;
       }
 
@@ -1536,11 +1556,12 @@ class ScreenFogOverlay {
     if (!snap) return false;
 
     if (!this.worldMaskCanvas) {
-      const doc: Document =
-        this.overlayHostEl?.ownerDocument ??
-        this.targetEl?.ownerDocument ??
-        window.document;
-      this.worldMaskCanvas = doc.createElement("canvas");
+      const canvasHost =
+        this.overlayHostEl ??
+        this.targetEl ??
+        this.stageEl;
+      this.worldMaskCanvas = canvasHost.createEl("canvas");
+      this.worldMaskCanvas.remove();
       this.worldMaskCtx = this.worldMaskCanvas.getContext("2d");
       if (!this.worldMaskCtx) {
         this.worldMaskCanvas = null;
@@ -2616,7 +2637,7 @@ class ScreenControllerView extends BaseRenderedScreenView {
         this.fogOverlay?.setBrushRadius(Number(this.fogRadiusInput?.value ?? "40"));
         this.syncFogControls();
       };
-      this.fogRadiusLabel = row.createEl("span", { text: "40px" });
+      this.fogRadiusLabel = row.createSpan({ text: "40px" });
 
       row.createEl("button", { text: "Reset to full fog" }).onclick = () => {
         void this.fogOverlay?.fillFullFogAndPublish();
@@ -2672,7 +2693,7 @@ class ScreenControllerView extends BaseRenderedScreenView {
       this.seekInput = timelineRow.createEl("input", {
         attr: { type: "range", min: "0", max: "0", step: "0.01", value: "0" },
       });
-      this.timeLabelEl = timelineRow.createEl("span", { text: "0:00 / 0:00" });
+      this.timeLabelEl = timelineRow.createSpan({ text: "0:00 / 0:00" });
 
       this.seekInput.addEventListener("pointerdown", () => {
         this.isScrubbing = true;
@@ -2694,7 +2715,7 @@ class ScreenControllerView extends BaseRenderedScreenView {
       const volumeRow = this.controlsEl.createDiv({
         cls: "ttrpg-tools-screen-controller__row",
       });
-      volumeRow.createEl("span", { text: "Volume" });
+      volumeRow.createSpan({ text: "Volume" });
       this.volumeInput = volumeRow.createEl("input", {
         attr: { type: "range", min: "0", max: "1", step: "0.01", value: "1" },
       });
@@ -2726,7 +2747,7 @@ class ScreenControllerView extends BaseRenderedScreenView {
       setCssProps(this.pdfPageInput, {
         width: "7ch",
       });
-      this.pdfPageLabel = row.createEl("span", { text: "/ 1" });
+      this.pdfPageLabel = row.createSpan({ text: "/ 1" });
       this.pdfPageInput.onchange = () => {
         void this.plugin.applyPdfCommand({
           type: "set-page",
@@ -2738,7 +2759,7 @@ class ScreenControllerView extends BaseRenderedScreenView {
       this.pdfZoomInput = row.createEl("input", {
         attr: { type: "range", min: "0.25", max: "3", step: "0.05", value: "1" },
       });
-      this.pdfZoomLabel = row.createEl("span", { text: "100%" });
+      this.pdfZoomLabel = row.createSpan({ text: "100%" });
       this.pdfZoomInput.oninput = () => {
         const zoom = Number(this.pdfZoomInput?.value ?? "1");
         if (this.pdfZoomLabel) this.pdfZoomLabel.textContent = `${Math.round(zoom * 100)}%`;
@@ -2872,6 +2893,21 @@ class VaultMediaSuggestModal extends FuzzySuggestModal<TFile> {
 
 export default class TTRPGToolsScreenPlugin extends Plugin {
   settings: ScreenDisplaySettings = DEFAULT_SETTINGS;
+  public readonly controlsApi: ControlsProviderApiLike = {
+    apiVersion: 1,
+    providerId: "ttrpg-tools-screen",
+    providerName: "TTRPG Tools - Player Screen",
+    getActions: () => this.getControlsActions(),
+    executeAction: async (actionId) => {
+      await this.executeControlsAction(actionId);
+    },
+    onActionsChanged: (callback) => {
+      this.controlsActionListeners.add(callback);
+      return () => {
+        this.controlsActionListeners.delete(callback);
+      };
+    },
+  };
 
   private screenLeaf: WorkspaceLeaf | null = null;
   private currentPayload: ScreenPayload | null = null;
@@ -2885,6 +2921,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   private currentVideoSnapshot: VideoPlaybackSnapshot | null = null;
   private currentPdfSnapshot: PdfPlaybackSnapshot | null = null;
   private imageConverterPatchRetryTimeout: number | null = null;
+  private controlsActionListeners = new Set<() => void>();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -2996,6 +3033,12 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         void this.onVaultModify(file);
+      }),
+    );
+	
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => {
+        this.notifyControlsActionsChanged();
       }),
     );
 	
@@ -3421,6 +3464,168 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
   /* ------------------------------------------------------
    * Public API for other plugins, especially Maps
    * ------------------------------------------------------ */
+   
+  private getControlsActions(): ControlsProviderActionLike[] {
+    const activeNote = this.getActiveMarkdownFile();
+    const firstPdf = this.getFirstPdfLinkedFromActiveNote();
+
+    return [
+      {
+        id: "screen.open",
+        name: "Open player screen",
+        icon: "monitor-up",
+        group: "Player screen",
+        description: "Open the player-facing popout window.",
+        available: true,
+        active: this.isScreenLeafUsable(),
+      },
+      {
+        id: "screen.close",
+        name: "Close player screen",
+        icon: "monitor-off",
+        group: "Player screen",
+        description: "Close the player-facing popout window.",
+        available: this.isScreenLeafUsable(),
+      },
+      {
+        id: "controller.open",
+        name: "Open player screen controller",
+        icon: "layout-dashboard",
+        group: "Player screen",
+        description: "Open the GM controller for the player screen.",
+        available: true,
+      },
+      {
+        id: "active-note.send",
+        name: "Send active note",
+        icon: "file-text",
+        group: "Player screen",
+        description: "Send the currently active Markdown note to the player screen.",
+        available: activeNote !== null,
+      },
+      {
+        id: "active-note.send-first-pdf",
+        name: "Send first PDF from active note",
+        icon: "file-text",
+        group: "Player screen",
+        description: "Send the first linked or embedded PDF from the active note.",
+        available: firstPdf !== null,
+      },
+      {
+        id: "media-picker.open",
+        name: "Open player screen media picker",
+        icon: "images",
+        group: "Player screen",
+        description: "Choose an image, video, or PDF to send to the player screen.",
+        available: true,
+      },
+      {
+        id: "settings.open",
+        name: "Open Player Screen settings",
+        icon: "settings",
+        group: "Management",
+        description: "Open the settings for TTRPG Tools - Player Screen.",
+        available: true,
+      },
+    ];
+  }
+
+  private async executeControlsAction(actionId: string): Promise<void> {
+    if (actionId === "screen.open") {
+      await this.openScreenWindow();
+      return;
+    }
+
+    if (actionId === "screen.close") {
+      this.closeScreenWindow();
+      return;
+    }
+
+    if (actionId === "controller.open") {
+      await this.openOrUpdateController();
+      return;
+    }
+
+    if (actionId === "active-note.send") {
+      await this.sendActiveNote();
+      return;
+    }
+
+    if (actionId === "active-note.send-first-pdf") {
+      await this.sendFirstPdfLinkedFromActiveNote();
+      return;
+    }
+
+    if (actionId === "media-picker.open") {
+      new VaultMediaSuggestModal(this.app, this).open();
+      return;
+    }
+
+    if (actionId === "settings.open") {
+      this.openPluginSettings();
+    }
+  }
+
+  private notifyControlsActionsChanged(): void {
+    for (const callback of this.controlsActionListeners) {
+      try {
+        callback();
+      } catch {
+        // A Controls consumer must not be able to break Player Screen.
+      }
+    }
+  }
+
+  private getActiveMarkdownFile(): TFile | null {
+    const file = this.app.workspace.getActiveFile();
+    if (!(file instanceof TFile)) return null;
+    return file.extension.toLowerCase() === "md" ? file : null;
+  }
+
+  private getFirstPdfLinkedFromActiveNote(): TFile | null {
+    const activeNote = this.getActiveMarkdownFile();
+    if (!activeNote) return null;
+
+    const cache = this.app.metadataCache.getFileCache(activeNote);
+    const references = [
+      ...(cache?.embeds ?? []),
+      ...(cache?.links ?? []),
+    ];
+
+    for (const reference of references) {
+      const file = this.resolveVaultFile(reference.link, activeNote.path);
+      if (
+        file instanceof TFile &&
+        isPdfExt(file.extension.toLowerCase())
+      ) {
+        return file;
+      }
+    }
+
+    return null;
+  }
+
+  private async sendFirstPdfLinkedFromActiveNote(): Promise<void> {
+    const pdf = this.getFirstPdfLinkedFromActiveNote();
+    if (!pdf) {
+      new Notice("No linked or embedded PDF found in the active note.", 2500);
+      return;
+    }
+
+    await this.sendPdfByPath(pdf.path);
+  }
+
+  private openPluginSettings(): void {
+    const appWithSettings = this.app as unknown as {
+      setting?: {
+        open: () => void;
+        openTabById: (id: string) => void;
+      };
+    };
+
+    appWithSettings.setting?.open();
+    appWithSettings.setting?.openTabById(this.manifest.id);
+  }
    
   private makeFogKey(kind: "note" | "image" | "markdown", id: string): string {
     return `${kind}:${id}`;
@@ -4710,6 +4915,80 @@ class ScreenDisplaySettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      {
+        type: "group",
+        heading: "Player screen",
+        items: [
+          {
+            name: "Auto-open on send",
+            desc: "Opens the screen window automatically when content is sent.",
+            control: {
+              type: "toggle",
+              key: "autoOpenOnSend",
+            },
+          },
+          {
+            name: "Remember window placement",
+            desc: "The player screen window remembers its last size and position automatically.",
+            action: () => {
+              void this.resetSavedWindowPlacement();
+            },
+          },
+        ],
+      },
+      {
+        type: "group",
+        heading: "Fog of war",
+        items: [
+          {
+            name: "Persistent fog mask folder",
+            desc: "Vault folder where persistent fog-of-war masks are stored as PNG files.",
+            render: (setting: Setting) => {
+              setting.addText((text) => {
+                text
+                  .setPlaceholder("ZoomMap/PlayerScreen/Fog")
+                  .setValue(
+                    this.plugin.settings.fogMaskFolder ??
+                      "ZoomMap/PlayerScreen/Fog",
+                  )
+                  .onChange((value) => {
+                    this.plugin.settings.fogMaskFolder = normalizePath(
+                      value.trim() || "ZoomMap/PlayerScreen/Fog",
+                    );
+                    void this.plugin.saveSettings();
+                  });
+              });
+            },
+          },
+          {
+            name: "Clear saved fog mask index",
+            desc: "Clears the saved fog-mask index from plugin settings. Existing PNG files are not deleted.",
+            action: () => {
+              void this.clearFogMaskIndex();
+            },
+          },
+        ],
+      },
+    ];
+  }
+
+  private async resetSavedWindowPlacement(): Promise<void> {
+    delete this.plugin.settings.savedWindowX;
+    delete this.plugin.settings.savedWindowY;
+    delete this.plugin.settings.savedWindowWidth;
+    delete this.plugin.settings.savedWindowHeight;
+    await this.plugin.saveSettings();
+    new Notice("Saved player screen window placement reset.", 2000);
+  }
+
+  private async clearFogMaskIndex(): Promise<void> {
+    this.plugin.settings.fogMaskFiles = {};
+    await this.plugin.saveSettings();
+    new Notice("Saved fog-mask index cleared.", 2000);
+  }
+
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
@@ -4718,13 +4997,7 @@ class ScreenDisplaySettingTab extends PluginSettingTab {
       .setName("Remember window placement")
       .setDesc("The player screen window remembers its last size and position automatically.")
       .addButton((b) => {
-        b.setButtonText("Reset saved position").onClick(async () => {
-          delete this.plugin.settings.savedWindowX;
-          delete this.plugin.settings.savedWindowY;
-          delete this.plugin.settings.savedWindowWidth;
-          delete this.plugin.settings.savedWindowHeight;
-          await this.plugin.saveSettings();
-        });
+		b.setButtonText("Reset saved position").onClick(() => void this.resetSavedWindowPlacement());
       });
 
     new Setting(containerEl)
@@ -4755,11 +5028,7 @@ class ScreenDisplaySettingTab extends PluginSettingTab {
       .setName("Clear saved fog mask index")
       .setDesc("Clears the saved fog-mask index from plugin settings. Existing PNG files are not deleted.")
       .addButton((b) => {
-        b.setButtonText("Clear index").onClick(async () => {
-          this.plugin.settings.fogMaskFiles = {};
-          await this.plugin.saveSettings();
-          new Notice("Saved fog-mask index cleared.", 2000);
-        });
+        b.setButtonText("Clear index").onClick(() => void this.clearFogMaskIndex());
       });
 
   }
