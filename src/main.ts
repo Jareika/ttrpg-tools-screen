@@ -17,6 +17,7 @@ import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import type {
   App,
   Editor,
+  MarkdownFileInfo,
   MarkdownPostProcessorContext,
   MarkdownView,
   SettingDefinitionItem,
@@ -437,6 +438,10 @@ function normalizeHeadingSection(lines: string[]): string {
 
 function isFinitePositiveNumber(x: unknown): x is number {
   return typeof x === "number" && Number.isFinite(x) && x > 0;
+}
+
+function isFiniteNumber(x: unknown): x is number {
+  return typeof x === "number" && Number.isFinite(x);
 }
 
 function setCssProps(el: HTMLElement, props: Record<string, string | null>): void {
@@ -1918,7 +1923,6 @@ class ScreenPdfRenderer {
 }
 
 class ScreenDisplayView extends BaseRenderedScreenView {
-  private plugin: TTRPGToolsScreenPlugin;
   private windowTrackTimer: number | null = null;
   private stopTrackingWindowBounds: (() => void) | null = null;
   private trackedVideoEl: HTMLVideoElement | null = null;
@@ -1927,8 +1931,7 @@ class ScreenDisplayView extends BaseRenderedScreenView {
   private videoStateRaf: number | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: TTRPGToolsScreenPlugin) {
-    super(leaf);
-    this.plugin = plugin;
+    super(leaf, plugin);
   }
 
   getViewType(): string {
@@ -3020,7 +3023,9 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
-        this.extendFileMenu(menu, file);
+        if (file instanceof TFile) {
+          this.extendFileMenu(menu, file);
+        }
       }),
     );
 
@@ -3032,7 +3037,9 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
 
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
-        void this.onVaultModify(file);
+        if (file instanceof TFile) {
+          void this.onVaultModify(file);
+        }
       }),
     );
 	
@@ -3276,7 +3283,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
       const af = this.app.vault.getAbstractFileByPath(normalizePath(storedPath));
       if (af instanceof TFile) {
         try {
-          await this.app.fileManager.trashFile(af, true);
+          await this.app.fileManager.trashFile(af);
         } catch (err) {
           console.warn("Player Screen: could not trash fog mask file", {
             key,
@@ -3439,7 +3446,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     const width = this.settings.savedWindowWidth;
     const height = this.settings.savedWindowHeight;
 
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    if (!isFiniteNumber(x) || !isFiniteNumber(y)) return null;
     if (!isFinitePositiveNumber(width) || !isFinitePositiveNumber(height)) return null;
 
     return {
@@ -3974,7 +3981,11 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     }
   }
 
-  private extendEditorMenu(menu: Menu, editor: Editor, view: MarkdownView): void {
+  private extendEditorMenu(
+    menu: Menu,
+    editor: Editor,
+    view: MarkdownView | MarkdownFileInfo,
+  ): void {
     const file = view.file;
     if (!(file instanceof TFile)) return;
     const selected = editor.getSelection();
@@ -4233,7 +4244,10 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     return markdown.endsWith("\n") ? markdown : `${markdown}\n`;
   }
 
-  private async sendSelectedText(editor: Editor, view: MarkdownView): Promise<void> {
+  private async sendSelectedText(
+    editor: Editor,
+    view: MarkdownView | MarkdownFileInfo,
+  ): Promise<void> {
     const file = view.file;
     if (!(file instanceof TFile)) {
       new Notice("No note available.", 1500);
@@ -4249,7 +4263,10 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     await this.sendMarkdown(this.normalizeMarkdownSnippet(selected), file.path);
   }
 
-  private async sendEditorContext(editor: Editor, view: MarkdownView): Promise<void> {
+  private async sendEditorContext(
+    editor: Editor,
+    view: MarkdownView | MarkdownFileInfo,
+  ): Promise<void> {
     const file = view.file;
     if (!(file instanceof TFile)) {
       new Notice("No note available.", 1500);
@@ -4298,7 +4315,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     const lines = text.split("\n");
     const headings =
       allHeadings ??
-      ((this.app.metadataCache.getFileCache(file)?.headings ?? []) as HeadingCacheEntry[]);
+      (this.app.metadataCache.getFileCache(file)?.headings ?? []);
 
     const start = heading.position.start.line;
     let endExclusive = lines.length;
@@ -4696,7 +4713,7 @@ export default class TTRPGToolsScreenPlugin extends Plugin {
     }
 
     const children = Array.isArray(parent.children) ? parent.children : [];
-    const index = children.indexOf(anchor as unknown);
+    const index = children.indexOf(anchor);
 
     try {
       return workspaceAny.createLeafInParent(parent, index >= 0 ? index + 1 : undefined);
@@ -4948,7 +4965,7 @@ class ScreenDisplaySettingTab extends PluginSettingTab {
             render: (setting: Setting) => {
               setting.addText((text) => {
                 text
-                  .setPlaceholder("ZoomMap/PlayerScreen/Fog")
+                  .setPlaceholder("Zoommap/playerscreen/fog")
                   .setValue(
                     this.plugin.settings.fogMaskFolder ??
                       "ZoomMap/PlayerScreen/Fog",

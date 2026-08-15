@@ -1,11 +1,12 @@
 {
   "name": "ttrpg-tools-screen",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "private": true,
   "license": "MIT",
   "scripts": {
     "build": "node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs watch",
+	"check": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix"
   },
